@@ -160,6 +160,10 @@ class Asset:
         return len(self.resp.body) if self.resp else 0
 
     @property
+    def rate_limited(self):
+        return self.resp is not None and self.resp.status == 429
+
+    @property
     def failed(self):
         return self.resp is None or bool(self.resp.error) or self.resp.status >= 400
 
@@ -205,7 +209,7 @@ CSS_URL = re.compile(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", re.I)
 CSS_IMPORT = re.compile(r"@import\s+(?:url\()?\s*['\"]?([^'\")\s;]+)", re.I)
 
 
-def fetch_assets(assets, progress=None, workers=8, cancelled=None):
+def fetch_assets(assets, progress=None, workers=4, cancelled=None):
     """Download every file the page uses (and fonts/images the CSS uses). Fills in asset.resp."""
     def get(asset):
         if cancelled and cancelled():
@@ -297,7 +301,7 @@ def analyze(page, parser, assets, site_host, error_category="server"):
                                 "Remove unused plugins and combine or delay non-essential CSS/JS.", impact=n * 3))
 
     # Broken files
-    broken = [a for a in assets if a.failed]
+    broken = [a for a in assets if a.failed and not a.rate_limited]
     if broken:
         findings.append(Finding(
             "content", WARNING if len(broken) < 5 else CRITICAL,

@@ -8,6 +8,7 @@ import gzip
 import http.client
 import json
 import socket
+import threading
 import ssl
 import time
 import urllib.request
@@ -25,6 +26,10 @@ USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
 ACCEPT_ENCODING = "gzip, deflate, br" if brotli else "gzip, deflate"
 MAX_BODY = 20 * 1024 * 1024
 REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+# Addresses where the site told us to slow down (429 Too Many Requests), so the report can say the test was throttled
+rate_limited = set()
+_rate_lock = threading.Lock()
 
 
 def ms_since(start):
@@ -148,8 +153,21 @@ def _describe_error(e):
 
 
 def fetch(url, method="GET", headers=None, data=None, timeout=20.0, read_body=True, alpn=("http/1.1",),
-          max_body=MAX_BODY):
-    """Make one request on a brand-new connection (like a first-time visitor) and time every stage."""
+          max_body=MAX_BODY, retry_429=True):
+    """Make one request on a brand-new connection (like a first-time visitor) and time every stage.
+    If the site says "too many requests" (429), wait as asked (up to 5 s) and try once more."""
+    resp = _fetch(url, method, headers, data, timeout, read_body, alpn, max_body)
+    if resp.status == 429:
+        with _rate_lock:
+            rate_limited.add(url)
+        if retry_429:
+            wait = resp.header("retry-after").strip()
+            time.sleep(min(5.0, float(wait)) if wait.isdigit() else 2.0)
+            resp = _fetch(url, method, headers, data, timeout, read_body, alpn, max_body)
+    return resp
+
+
+def _fetch(url, method, headers, data, timeout, read_body, alpn, max_body):
     resp = Response(url)
     parts = urlsplit(url)
     host = parts.hostname

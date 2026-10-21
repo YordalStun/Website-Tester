@@ -151,6 +151,10 @@ def test_full_run_against_fake_site(monkeypatch):
                      "cart fragments", "CSS uses @import", "The site doesn't use HTTPS", "No mobile viewport tag",
                      "missing or broken"):
         assert expected in joined, expected
+    broken = next(f for f in r.findings if "missing or broken" in f.title)
+    assert not any("limited.css" in item for item in broken.items)
+    throttled = next(f for f in r.findings if f.title == "The site's firewall slowed this test down")
+    assert any("limited.css" in item for item in throttled.items)
     s = r.server
     assert s["home"]["think"] >= 150 and s["static"]["think"] < 100 and s["wp_backend"]["think"] >= 150
     assert r.diagnosis["headline"] == "Main problem: WordPress (no page cache)"

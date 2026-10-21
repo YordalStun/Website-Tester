@@ -8,7 +8,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 from . import browser, diagnosis, dnscheck, net, pagecheck, pagespeed, server, wordpress
-from .findings import CRITICAL, INFO, Finding, grade, overall_score
+from .findings import CRITICAL, INFO, WARNING, Finding, grade, overall_score
 
 
 @dataclass
@@ -83,7 +83,7 @@ def normalise(target):
 
 STEPS = [  # (key, share of the progress bar)
     ("dns", 6), ("page", 6), ("ssl", 3), ("assets", 12), ("wordpress", 14), ("server", 22), ("seo", 3),
-    ("browser", 30), ("pagespeed", 4),
+    ("browser", 30), ("browser_findings", 0), ("pagespeed", 4),
 ]
 
 
@@ -124,6 +124,7 @@ class Runner:
     def run(self):
         r = self.r
         started = time.time()
+        net.rate_limited.clear()
         host = urlsplit(r.start_url).hostname
 
         if self.options.dns:
@@ -134,6 +135,11 @@ class Runner:
             if self.options.pagespeed:
                 psi_thread = threading.Thread(target=self._pagespeed, daemon=True)
                 psi_thread.start()
+            # The browser goes first, before our other requests could make a firewall slow the site down for us
+            if self.options.browser:
+                self._step("browser", "Loading the page in a real browser", self._browser)
+            else:
+                self._done += dict(STEPS)["browser"]
             self._step("ssl", "Checking the SSL certificate and redirects", lambda w: self._ssl())
             self._step("assets", "Downloading every file the page uses", self._assets)
             if r.is_wp:
@@ -142,16 +148,15 @@ class Runner:
                 self._done += dict(STEPS)["wordpress"]
             self._step("server", "Timing the server", self._server)
             self._step("seo", "Checking SEO basics and security headers", lambda w: self._seo())
-            if self.options.browser:
-                self._step("browser", "Loading the page in a real browser", self._browser)
-            else:
-                self._done += dict(STEPS)["browser"]
+            if r.browser:
+                self._step("browser_findings", "Working out what slowed the browser down", lambda w: self._browser_findings())
             if psi_thread:
                 self.progress("Waiting for Google PageSpeed", 0, 0)
                 while psi_thread.is_alive() and not self.cancelled():
                     psi_thread.join(0.5)
             self._done += dict(STEPS)["pagespeed"]
             self.add(pagespeed.findings_for(r.psi) if self.options.pagespeed and r.psi else [])
+        self._throttled()
         r.cancelled = self.cancelled()
         if self._progress:
             self._progress("Working out the diagnosis", 99)
@@ -304,11 +309,32 @@ class Runner:
             self.progress(f"{text} with {name}", count[0] / len(profiles), weight)
             count[0] += 1
         r.browser = browser.run(r.final_url, profiles, progress=step, cancelled=self.cancelled)
+
+    def _browser_findings(self):
+        r = self.r
         known = {a.url for a in r.assets if a.failed}
         self.add(diagnosis.browser_findings(r.browser, known_broken=known, site_host=r.site_host))
         desktop = r.browser.get("desktop") or {}
         if not desktop.get("error"):
             self.add(wordpress.plugin_findings_from_browser(desktop, r.wp, r.site_host))
+
+    def _throttled(self):
+        """Tell the user if the site's firewall slowed down or blocked our requests - it skews the timings."""
+        urls = set(net.rate_limited)
+        for name in ("desktop", "mobile"):
+            for req in (self.r.browser.get(name) or {}).get("requests") or []:
+                if req["status"] == 429:
+                    urls.add(req["url"])
+        if urls:
+            self.add([Finding(
+                "server", WARNING, "The site's firewall slowed this test down",
+                f"The server answered {len(urls)} of our requests with \"429 Too Many Requests\" - a firewall or rate "
+                "limit decided the test was making too many requests. Timings measured after that point may be "
+                "slower than real visitors get, and those files are not counted as broken. Real visitors on busy "
+                "networks (offices, schools, mobile networks) can be caught by strict limits too.",
+                "Run the test again in a few minutes. If it keeps happening, allow your own IP address in the "
+                "firewall (Cloudflare, Wordfence, Sucuri or your host) while testing, and check the limit isn't too "
+                "strict for real visitors.", items=sorted(urls)[:15])])
 
     def _pagespeed(self):
         try:

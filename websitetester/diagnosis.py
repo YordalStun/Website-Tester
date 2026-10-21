@@ -99,6 +99,7 @@ def browser_findings(results, known_broken=(), site_host=""):
             items=[f"{e['text'][:200]}" + (f" ({short_url(e['url'], 70)})" if e.get("url") else "") for e in errors[:12]]))
     backend = {c["url"] for c in d.get("backend_calls") or []}  # reported separately
     failed = [r for r in d.get("requests", []) if (r["status"] >= 400 or (r["failed"] and not r["canceled"]))
+              and r["status"] != 429
               and r["url"] not in known_broken and r["url"] not in backend and not r["url"].startswith("data:")]
     if failed:
         findings.append(Finding(

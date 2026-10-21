@@ -38,6 +38,7 @@ PAGE = """<!DOCTYPE html>
 <link rel="stylesheet" href="/wp-content/themes/astra/style.css?ver=4.0.0">
 <link rel="stylesheet" href="/wp-content/themes/astra-child/style.css?ver=1.0">
 <link rel="stylesheet" href="/wp-content/plugins/old-thing/missing.css?ver=1.0">
+<link rel="stylesheet" href="/wp-content/plugins/old-thing/limited.css?ver=1.0">
 <script src="/wp-includes/js/jquery/jquery.min.js?ver=3.6.4"></script>
 <script src="/wp-includes/js/jquery/jquery-migrate.min.js?ver=3.4.0"></script>
 <script src="/wp-content/plugins/revslider/public/assets/js/rbtools.min.js?ver=6.6.0"></script>
@@ -148,6 +149,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, HERO, "image/png")
         if path.startswith("/wp-content/uploads/2023/01/"):
             return self._send(200, SMALL, "image/png")
+        if path.endswith("/limited.css"):
+            return self._send(429, b"Too Many Requests", "text/plain", {"Retry-After": "0"})
         if path in FILES:
             body, ctype = FILES[path]
             return self._send(200, body, ctype)
