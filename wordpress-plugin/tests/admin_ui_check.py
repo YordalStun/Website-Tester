@@ -23,6 +23,11 @@ def main():
         except BaseException:
             # Keep evidence of what the page looked like when it went wrong
             try:
+                print("FAILED on:", page.url, "-", page.title())
+                print((page.inner_text("body") or "")[:1500])
+            except Exception:
+                pass
+            try:
                 page.screenshot(path=os.path.join(out, "failure.png"), full_page=True)
                 with open(os.path.join(out, "failure.html"), "w", encoding="utf-8") as f:
                     f.write(page.content())
@@ -38,8 +43,13 @@ def check(page, site, user, password, out):
     page.fill("#user_login", user)
     page.fill("#user_pass", password)
     page.click("#wp-submit")
-    # Don't wait for the whole dashboard to load (its widgets can be slow) - just for the login to go through
-    page.wait_for_url("**/wp-admin/**", wait_until="commit", timeout=120000)
+    # Don't wait for the whole dashboard to load (its widgets can be slow) - just for the login to go through,
+    # or for WordPress to show a login error
+    page.wait_for_function(
+        "() => location.pathname.indexOf('/wp-admin') !== -1 || !!document.getElementById('login_error')",
+        timeout=120000)
+    if "/wp-admin" not in page.url:
+        raise SystemExit("login failed: " + (page.text_content("#login_error") or "").strip())
     page.goto(f"{site}/wp-admin/tools.php?page=jj-speed-inspector", wait_until="domcontentloaded", timeout=120000)
     before = page.get_attribute(".jjsi-hero", "data-created") if page.query_selector(".jjsi-hero") else ""
     page.click("#jjsi-run")
