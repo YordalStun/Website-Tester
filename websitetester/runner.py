@@ -307,7 +307,7 @@ class Runner:
         count = [0]
 
         def step(text):
-            self.progress(f"{text} with {name}", count[0] / len(profiles), weight)
+            self.progress(f"{text} with {name}", count[0] / (len(profiles) + 1), weight)
             count[0] += 1
         r.browser = browser.run(r.final_url, profiles, progress=step, cancelled=self.cancelled)
 

@@ -160,6 +160,9 @@ def breakdown(r):
         if redirect_ms:
             rows.append(("Redirects (from the address typed)", redirect_ms, "redirect"))
         tls = nav.get("tls") or 0
+        before = (nav.get("requestStart") or 0) - (nav.get("dns") or 0) - (nav.get("connect") or 0)
+        if before > 100:
+            rows.append(("Before the request was sent (redirects or a security check)", before, "redirect"))
         rows += [("Finding the server (DNS)", max(0, nav.get("dns") or 0), "dns"),
                  ("Connecting", max(0, (nav.get("connect") or 0) - tls), "network"),
                  ("Secure connection (SSL)", max(0, tls), "network"),

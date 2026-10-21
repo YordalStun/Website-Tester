@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 import websocket
 
@@ -311,6 +312,7 @@ class Browser:
         self.proc = None
         self.profile = None
         self.port = None
+        self.browser_ws = None
 
     def start(self, timeout=30):
         self.profile = tempfile.mkdtemp(prefix="websitetester-")
@@ -332,9 +334,10 @@ class Browser:
                 raise BrowserError(f"{self.name} closed straight away (exit code {self.proc.returncode})")
             try:
                 with open(port_file, encoding="utf-8") as f:
-                    first = f.readline().strip()
-                if first.isdigit():
+                    first, second = f.readline().strip(), f.readline().strip()
+                if first.isdigit() and second:
                     self.port = int(first)
+                    self.browser_ws = f"ws://127.0.0.1:{self.port}{second}"
                     return
             except OSError:
                 pass
@@ -375,14 +378,46 @@ class Browser:
     def __exit__(self, *exc):
         self.stop()
 
-    def load(self, url, profile=DESKTOP, deep=False, timeout=60, cancelled=None):
-        """Load url like a first-time visitor and return the measurements."""
-        rec = Recorder()
-        cdp = CDP(self._page_ws(), rec)
+    def warm_up(self, url, timeout=20):
+        """A brand-new browser does a lot of one-off work on its very first request (Edge checks proxy settings
+        and SmartScreen, for example) - over a second that has nothing to do with the website. Get that out of the
+        way with one tiny request (robots.txt) so it isn't counted."""
+        parts = urlsplit(url)
+        cdp = CDP(self._page_ws(), lambda method, params: None)
         try:
-            return self._load(cdp, rec, url, profile, deep, timeout, cancelled)
+            loaded = []
+            cdp.on_event = lambda method, params: loaded.append(method) if method == "Page.loadEventFired" else None
+            cdp.send("Page.enable")
+            cdp.send("Page.navigate", {"url": f"{parts.scheme}://{parts.netloc}/robots.txt"}, timeout=timeout)
+            deadline = time.monotonic() + timeout
+            while not loaded and time.monotonic() < deadline:
+                cdp.pump(0.25)
+        except BrowserError:
+            pass
         finally:
             cdp.close()
+
+    def load(self, url, profile=DESKTOP, deep=False, timeout=60, cancelled=None):
+        """Load url like a first-time visitor and return the measurements. Each load gets its own fresh browser
+        context (like a private window): empty cache, no cookies and no open connections."""
+        rec = Recorder()
+        control = CDP(self.browser_ws, lambda method, params: None)
+        context = None
+        try:
+            context = control.send("Target.createBrowserContext", {"disposeOnDetach": False})["browserContextId"]
+            target = control.send("Target.createTarget", {"url": "about:blank", "browserContextId": context})
+            cdp = CDP(f"ws://127.0.0.1:{self.port}/devtools/page/{target['targetId']}", rec)
+            try:
+                return self._load(cdp, rec, url, profile, deep, timeout, cancelled)
+            finally:
+                cdp.close()
+        finally:
+            if context:
+                try:
+                    control.send("Target.disposeBrowserContext", {"browserContextId": context})
+                except BrowserError:
+                    pass
+            control.close()
 
     def _load(self, cdp, rec, url, profile, deep, timeout, cancelled):
         for domain in ("Page", "Network", "Runtime", "Log"):
@@ -487,18 +522,25 @@ class Browser:
 
 
 def run(url, profiles=(DESKTOP, MOBILE), deep_profile="desktop", progress=None, cancelled=None):
-    """Run each profile in a fresh browser (so every run is a first visit). Returns {profile_name: data or error}."""
+    """Load the page once per profile, each in a fresh private context. Returns {profile_name: data or error}."""
     results = {}
-    for profile in profiles:
-        if cancelled and cancelled():
-            break
-        if progress:
-            progress(f"Loading the page in a real browser ({profile['name']})")
-        try:
-            with Browser() as b:
-                results[profile["name"]] = b.load(url, profile, deep=profile["name"] == deep_profile,
-                                                  timeout=90 if profile["mobile"] else 60, cancelled=cancelled)
-                results["browser_name"] = b.name
-        except (BrowserError, OSError, websocket.WebSocketException) as e:
-            results[profile["name"]] = {"error": str(e)}
+    try:
+        with Browser() as b:
+            results["browser_name"] = b.name
+            if progress:
+                progress("Starting the browser")
+            b.warm_up(url)
+            for profile in profiles:
+                if cancelled and cancelled():
+                    break
+                if progress:
+                    progress(f"Loading the page in a real browser ({profile['name']})")
+                try:
+                    results[profile["name"]] = b.load(url, profile, deep=profile["name"] == deep_profile,
+                                                      timeout=90 if profile["mobile"] else 60, cancelled=cancelled)
+                except (BrowserError, OSError, websocket.WebSocketException) as e:
+                    results[profile["name"]] = {"error": str(e)}
+    except (BrowserError, OSError, websocket.WebSocketException) as e:
+        for profile in profiles:
+            results.setdefault(profile["name"], {"error": str(e)})
     return results
