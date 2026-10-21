@@ -50,6 +50,9 @@ jobs:
           $WP config create --dbname=wp --dbuser=root --dbpass=root --dbhost=127.0.0.1 --skip-check
           $WP config set DISABLE_WP_CRON true --raw
           $WP core install --url=http://127.0.0.1:8899 --title="CI site" --admin_user=admin --admin_password=admin --admin_email=admin@example.com --skip-email
+          # WP-CLI adds the folder name to the address; the web server serves this folder at the root
+          $WP option update home http://127.0.0.1:8899
+          $WP option update siteurl http://127.0.0.1:8899
           $WP post generate --count=10 --quiet
           $WP post create --post_type=page --post_status=publish --post_title="About us" --quiet
           cp -r ../wordpress-plugin/jj-speed-inspector wp-content/plugins/
