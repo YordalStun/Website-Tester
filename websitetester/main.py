@@ -56,6 +56,8 @@ def selftest():
         from PySide6.QtWidgets import QApplication
         from . import ui
         app = QApplication([sys.argv[0]])
+        app.setStyle("Fusion")
+        ui.apply_light_theme(app)
         win = ui.MainWindow()
         win.summary.setHtml(report.summary_html(r))
         win.show()
@@ -121,6 +123,7 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("JJ Hosting")
     app.setStyle("Fusion")
+    ui.apply_light_theme(app)
     app.setWindowIcon(ui.app_icon())
     app.setFont(QFont("Segoe UI" if sys.platform == "win32" else app.font().family(), 10))
     win = ui.MainWindow()

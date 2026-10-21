@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                                QProgressBar, QPushButton, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget)
@@ -15,7 +15,11 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 from . import APP_NAME, VERSION, browser, report, runner
 
 STYLE = """
+QWidget { color: #1f2329; }
 QMainWindow, QWidget#central { background: #f6f7f9; }
+QCheckBox { spacing: 6px; }
+QComboBox QAbstractItemView { background: white; color: #1f2329; selection-background-color: #e8f0fe;
+                              selection-color: #1f2329; }
 QLabel#title { font-size: 20px; font-weight: 600; color: #1f2329; }
 QLabel#subtitle { color: #5f6368; }
 QFrame#card { background: white; border: 1px solid #e3e6ea; border-radius: 10px; }
@@ -33,6 +37,28 @@ QProgressBar::chunk { background: #1a73e8; border-radius: 5px; }
 QPlainTextEdit { background: white; border: 1px solid #e3e6ea; border-radius: 6px; font-family: Consolas, monospace;
                  font-size: 12px; }
 """
+
+
+def apply_light_theme(app):
+    """Always use the app's own light colours. Without this, Windows dark mode gives white text, which is
+    invisible on the app's white boxes."""
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except AttributeError:  # older Qt
+        pass
+    pal = QPalette()
+    colors = {
+        QPalette.Window: "#f6f7f9", QPalette.WindowText: "#1f2329", QPalette.Base: "#ffffff",
+        QPalette.AlternateBase: "#f1f3f4", QPalette.Text: "#1f2329", QPalette.Button: "#ffffff",
+        QPalette.ButtonText: "#1f2329", QPalette.ToolTipBase: "#ffffff", QPalette.ToolTipText: "#1f2329",
+        QPalette.Highlight: "#1a73e8", QPalette.HighlightedText: "#ffffff", QPalette.Link: "#1a73e8",
+        QPalette.PlaceholderText: "#80868b", QPalette.BrightText: "#ffffff",
+    }
+    for role, color in colors.items():
+        pal.setColor(QPalette.All, role, QColor(color))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        pal.setColor(QPalette.Disabled, role, QColor("#9aa0a6"))
+    app.setPalette(pal)
 
 
 def reports_folder():
