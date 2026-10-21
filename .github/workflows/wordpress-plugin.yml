@@ -54,7 +54,10 @@ jobs:
           $WP post create --post_type=page --post_status=publish --post_title="About us" --quiet
           cp -r ../wordpress-plugin/jj-speed-inspector wp-content/plugins/
           cp -r ../wordpress-plugin/tests/slowpoke wp-content/plugins/
-          if [ "${{ matrix.wp }}" = "latest" ]; then $WP plugin install contact-form-7 wordpress-seo --activate; fi
+          # A couple of popular real plugins too, where they support this PHP/WordPress version
+          if [ "${{ matrix.wp }}" = "latest" ]; then
+            for plugin in contact-form-7 wordpress-seo; do $WP plugin install $plugin --activate || echo "skipped $plugin"; done
+          fi
           $WP plugin activate jj-speed-inspector slowpoke
           test -f wp-content/mu-plugins/0-jj-speed-inspector.php
           $WP core version
@@ -82,13 +85,13 @@ jobs:
         run: |
           python3 -m pip install --quiet playwright
           python3 -m playwright install --with-deps chromium > /dev/null
-          python3 wordpress-plugin/tests/admin_ui_test.py http://127.0.0.1:8899 admin admin ui
+          python3 wordpress-plugin/tests/admin_ui_check.py http://127.0.0.1:8899 admin admin ui
 
       - name: Browser fallback when the host blocks the site calling itself
         run: |
           cp wordpress-plugin/tests/block-loopback.php site/wp-content/mu-plugins/
           (cd site && php ../wp-cli.phar option update jjsi_test_block_loopback 1)
-          python3 wordpress-plugin/tests/admin_ui_test.py http://127.0.0.1:8899 admin admin ui-blocked
+          python3 wordpress-plugin/tests/admin_ui_check.py http://127.0.0.1:8899 admin admin ui-blocked
           grep -q '"total_ms"' ui-blocked/*.md
           rm site/wp-content/mu-plugins/block-loopback.php
 
