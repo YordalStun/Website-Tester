@@ -97,6 +97,7 @@ jobs:
           python3 wordpress-plugin/tests/admin_ui_check.py http://127.0.0.1:8899 admin admin ui-blocked
           grep -q '"total_ms"' ui-blocked/*.md
           rm site/wp-content/mu-plugins/block-loopback.php
+          (cd site && php ../wp-cli.phar option delete jjsi_test_block_loopback)
 
       - name: Uninstalling leaves nothing behind
         run: |
