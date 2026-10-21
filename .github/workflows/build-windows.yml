@@ -1,0 +1,93 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build single-file app (WebsiteTester.exe)
+        run: python build.py
+
+      - name: Self-test the built app (tests a fake WordPress site with Microsoft Edge)
+        shell: pwsh
+        run: |
+          $env:WT_SELFTEST_OUT = "$PWD\selftest.txt"
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $p = Start-Process -FilePath "dist\WebsiteTester.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Test some real websites
+        continue-on-error: true  # depends on other people's websites; never blocks the download
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force live-reports | Out-Null
+          foreach ($site in @("wordpress.org", "jjhosting.co.uk", "wpbeginner.com")) {
+            Write-Output "=================== $site ==================="
+            python run.py $site --report "live-reports\$site.html" --text "live-reports\$site.txt" | Select-Object -Last 120
+          }
+
+      - name: Upload real-website reports
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: live-test-reports
+          path: live-reports/
+
+      - name: Build folder version (starts faster)
+        run: python build.py --folder
+
+      - name: Zip folder version
+        shell: pwsh
+        run: Compress-Archive -Path dist\WebsiteTester\* -DestinationPath dist\WebsiteTester-folder.zip
+
+      - name: Upload build (Actions artifact)
+        uses: actions/upload-artifact@v4
+        continue-on-error: true  # can fail if the account's artifact storage is full; the release below still works
+        with:
+          name: WebsiteTester-windows
+          path: |
+            dist/WebsiteTester.exe
+            dist/WebsiteTester-folder.zip
+
+      - name: Publish "Latest build" download (Releases page)
+        if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest-build --cleanup-tag --yes 2>$null
+          gh release create latest-build dist/WebsiteTester.exe dist/WebsiteTester-folder.zip `
+            --target $env:GITHUB_SHA --prerelease `
+            --title "Latest build ($env:GITHUB_REF_NAME)" `
+            --notes "Built automatically from commit $env:GITHUB_SHA on $env:GITHUB_REF_NAME. Download WebsiteTester.exe below and double-click it to run."
+
+      - name: Publish release (tags like v1.0.0)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/WebsiteTester.exe
+            dist/WebsiteTester-folder.zip
