@@ -183,7 +183,15 @@ def check_redirects(start_url, chain):
     elif len(hops) == 1:
         h = hops[0]
         a, b = urlsplit(h.url), urlsplit(chain[-1].url)
-        if a.hostname != b.hostname and a.path in ("", "/"):
+        if cost > 500:
+            findings.append(Finding(
+                "server", WARNING, f"A slow redirect ({cost:.0f} ms) before the page loads",
+                f"{h.url} redirects to {chain[-1].url}, and that redirect alone took {cost:.0f} ms. Redirects should "
+                "take a few milliseconds - this one is probably handled by WordPress (or a plugin) instead of the "
+                "web server.",
+                "Do the redirect in the web server or CDN instead (cPanel > Domains/Redirects, .htaccess, or a "
+                "Cloudflare Redirect Rule), and link to the final address everywhere.", impact=int(cost)))
+        elif a.hostname != b.hostname and a.path in ("", "/"):
             findings.append(Finding(
                 "server", INFO, f"Visitors to {a.hostname} are redirected to {b.hostname} ({cost:.0f} ms)",
                 "That's normal, but make sure links, Google and adverts use the final address so visitors skip "
@@ -260,7 +268,7 @@ def check_ssl(page, host):
     return data, findings
 
 
-def check_server(page, chain, is_wp, static_url=None, progress=None, cancelled=None, samples=5):
+def check_server(page, chain, is_wp, static_url=None, progress=None, cancelled=None, samples=5, locate=True):
     """Timing samples and the 'is it the server or WordPress?' split. Returns (data, findings)."""
     findings = []
     data = {}
@@ -307,8 +315,8 @@ def check_server(page, chain, is_wp, static_url=None, progress=None, cancelled=N
     data["rtt"] = rtt
 
     # Distance / round trip
-    me = lookup_location()
-    there = lookup_location(page.ip) if page.ip else {}
+    me = lookup_location() if locate else {}
+    there = lookup_location(page.ip) if locate and page.ip else {}
     data["tester_location"] = place(me)
     data["server_location"] = place(there)
     data["server_org"] = re.sub(r"^AS\d+\s+", "", there.get("org", ""))
@@ -347,11 +355,14 @@ def check_server(page, chain, is_wp, static_url=None, progress=None, cancelled=N
         sev, label = CRITICAL, "slow"
     elif think > 250:
         sev, label = WARNING, "a bit slow"
+    elif think < 15:
+        sev, label = GOOD, "instant"
     else:
         sev, label = GOOD, "fast"
     text = (f"After the request arrives, the server takes about {think:.0f} ms to start sending the page "
             f"(fastest {home_s['think_min']:.0f} ms, slowest {home_s['think_max']:.0f} ms over {home_s['count']} visits).")
-    findings.append(Finding("server", sev, f"Server response is {label} ({think:.0f} ms)", text,
+    findings.append(Finding("server", sev, f"Server response is {label}" + ("" if label == "instant" else f" ({think:.0f} ms)"),
+                            text,
                             "" if sev == GOOD else "See the diagnosis at the top of the report for what's causing it.",
                             impact=int(max(0, think - 150)), symptom=True))
     if home_s["think_max"] > 3 * max(home_s["think_min"], 50) and home_s["think_max"] - home_s["think_min"] > 400:
@@ -422,6 +433,10 @@ def check_server(page, chain, is_wp, static_url=None, progress=None, cancelled=N
     if page_cache:
         findings.append(Finding("caching", GOOD, "Page caching is working",
                                 data["cache_header"] or "A caching plugin's signature was found in the page."))
+    elif is_wp and think < 200:
+        findings.append(Finding("caching", INFO, "No page cache detected, but pages come back fast",
+                                f"We couldn't see a caching plugin or cache header, but the server answers in "
+                                f"{think:.0f} ms, so pages are probably cached in a way that doesn't show."))
     elif is_wp:
         sev = CRITICAL if think > 400 else WARNING
         findings.append(Finding(

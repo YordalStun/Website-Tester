@@ -273,6 +273,11 @@ def diagnose(r):
                            + "." + (f" The biggest parts are {parts}." if parts else "")))
 
     causes.sort(key=lambda c: -c[1])
+    if r.page is None or r.page.error:
+        reason = r.page.error if r.page is not None else "it couldn't be reached"
+        return {"headline": "The website couldn't be reached",
+                "paragraphs": [f"{r.start_url}: {reason}. Check the domain hasn't expired, its DNS points at the right "
+                               "server, and the server is running."], "causes": []}
     paragraphs = []
     speed = []
     if m_lcp:

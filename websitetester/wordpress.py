@@ -389,7 +389,7 @@ def check(base_url, page, parser, assets, progress=None, check_updates=True):
         slug = entry["slug"]
         readme = net.fetch(urljoin(page.url, f"/wp-content/plugins/{slug}/readme.txt"), timeout=15)
         entry["version"] = _readme_version(readme.text) if readme.ok and "text" in readme.content_type else ""
-        if not entry["version"] and len(entry["ver_params"]) == 1:
+        if not entry["version"] and len(entry["ver_params"]) == 1 and version not in entry["ver_params"]:
             entry["version"] = next(iter(entry["ver_params"]))
             entry["version_guess"] = True
         if check_updates:
@@ -415,7 +415,7 @@ def check(base_url, page, parser, assets, progress=None, check_updates=True):
                 w["failed"] += 1
     data["weights"] = {f"{k[0]}:{k[1]}": v for k, v in weights.items()}
 
-    outdated, abandoned, closed, premium = [], [], [], []
+    outdated, maybe_outdated, abandoned, closed, premium = [], [], [], [], []
     for entry in entries:
         slug = entry["slug"]
         info = entry.get("wporg") or {}
@@ -431,7 +431,7 @@ def check(base_url, page, parser, assets, progress=None, check_updates=True):
             closed.append(p)
         elif p["on_wporg"]:
             if p["version"] and p["latest"] and is_older(p["version"], p["latest"]):
-                outdated.append(p)
+                (maybe_outdated if p["version_guess"] else outdated).append(p)
             years = _years_since(p["last_updated"])
             if years is not None and years > 2:
                 p["years_since_update"] = years
@@ -460,8 +460,13 @@ def check(base_url, page, parser, assets, progress=None, check_updates=True):
             "Out-of-date plugins are the number one way WordPress sites get hacked, and updates often include speed "
             "fixes.", "Back up, then update them in Dashboard > Updates. Consider turning on auto-updates for "
                       "trusted plugins.", impact=60,
-            items=[f"{p['name']}: {p['version']} -> {p['latest']}" + (" (version is a best guess)" if p["version_guess"] else "")
-                   for p in outdated]))
+            items=[f"{p['name']}: {p['version']} -> {p['latest']}" for p in outdated]))
+    if maybe_outdated:
+        findings.append(Finding(
+            "plugins", INFO, f"{len(maybe_outdated)} plugin{'s' if len(maybe_outdated) != 1 else ''} may be out of date",
+            "The installed version couldn't be read for certain - this is a guess from the version numbers on its "
+            "files, which aren't always the plugin's version.", "Check Dashboard > Updates.",
+            items=[f"{p['name']}: looks like {p['version']}, latest is {p['latest']}" for p in maybe_outdated]))
     if abandoned:
         findings.append(Finding(
             "plugins", WARNING, f"{len(abandoned)} plugin{'s haven' if len(abandoned) != 1 else ' hasn'}'t been updated by the author in over 2 years",

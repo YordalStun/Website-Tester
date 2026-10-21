@@ -162,6 +162,8 @@ class Runner:
             r.errors.append(f"diagnosis: {e}\n{traceback.format_exc(limit=4)}")
             r.diagnosis = {"headline": "Test finished", "paragraphs": [], "causes": []}
         r.score = overall_score(r.findings)
+        if r.page is None or r.page.error:
+            r.score = 0  # nothing else matters if visitors can't reach the site
         r.grade = grade(r.score)
         r.duration = time.time() - started
         if self._progress:
@@ -278,10 +280,8 @@ class Runner:
             count[0] += 1
             self.progress(text, min(count[0] / 5, 1), weight)
         data, findings = server.check_server(r.page, r.chain, r.is_wp, static_url=self._static_url(), progress=step,
-                                             cancelled=self.cancelled, samples=self.options.samples)
-        if not self.options.location:
-            for key in ("tester_location", "server_location"):
-                data.pop(key, None)
+                                             cancelled=self.cancelled, samples=self.options.samples,
+                                             locate=self.options.location)
         r.server = data
         self.add(findings)
 
@@ -335,6 +335,7 @@ def plain_text_summary(r):
     lines += ["", "Fix these first:"]
     for f in top_fixes(r.findings, 12):
         lines.append(f"  [{f.severity.upper()}] ({CATEGORY_TITLES.get(f.category, f.category)}) {f.title}")
+        lines += [f"      - {item}" for item in f.items[:8]]
     lines += ["", f"WordPress: {'yes' if r.is_wp else 'no'}"]
     if r.is_wp:
         wp = r.wp or {}

@@ -44,7 +44,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force live-reports | Out-Null
-          foreach ($site in @("wordpress.org", "jjhosting.co.uk", "wpbeginner.com")) {
+          foreach ($site in @("wordpress.org", "wpbeginner.com", "elementor.com")) {
             Write-Output "=================== $site ==================="
             python run.py $site --report "live-reports\$site.html" --text "live-reports\$site.txt" | Select-Object -Last 120
           }

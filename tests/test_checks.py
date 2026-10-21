@@ -161,6 +161,12 @@ def test_full_run_against_fake_site(monkeypatch):
     assert "<script" not in report.summary_html(r)
 
 
+def test_unreachable_site_scores_f():
+    r = runner.run("http://127.0.0.1:1/", runner.Options(browser=False, pagespeed=False, location=False))
+    assert r.grade == "F" and r.diagnosis["headline"] == "The website couldn't be reached"
+    assert any(f.title == "The website couldn't be reached" for f in r.findings)
+
+
 @pytest.mark.skipif(not browser.find_browser()[0], reason="no Edge/Chrome/Chromium installed")
 def test_real_browser_on_fake_site():
     with FakeSite(slow=0.1) as url:
