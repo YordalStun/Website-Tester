@@ -149,28 +149,38 @@ def browser_findings(results, known_broken=(), site_host=""):
 
 
 def breakdown(r):
-    """Where the time goes for a first-time visitor (desktop, from this PC). List of (label, ms, key)."""
+    """Where the time goes for a first-time visitor on a desktop PC. List of (label, ms, key).
+    Uses the real browser's own timings when we have them (so it adds up to when the main content appeared),
+    otherwise our own timed requests."""
+    rows = []
+    redirect_ms = (r.redirects or {}).get("redirect_ms") or 0
+    d = (r.browser or {}).get("desktop") or {}
+    nav = d.get("nav") or {}
+    if d and not d.get("error") and d.get("lcp") and nav.get("responseEnd"):
+        if redirect_ms:
+            rows.append(("Redirects (from the address typed)", redirect_ms, "redirect"))
+        tls = nav.get("tls") or 0
+        rows += [("Finding the server (DNS)", max(0, nav.get("dns") or 0), "dns"),
+                 ("Connecting", max(0, (nav.get("connect") or 0) - tls), "network"),
+                 ("Secure connection (SSL)", max(0, tls), "network"),
+                 ("Waiting for the server to answer", max(0, nav["ttfb"] - (nav.get("requestStart") or 0)), "server"),
+                 ("Downloading the page", max(0, nav["responseEnd"] - nav["ttfb"]), "network"),
+                 ("Loading images, CSS & JavaScript and drawing the page", max(0, d["lcp"] - nav["responseEnd"]),
+                  "frontend")]
+        return [row for row in rows if row[0] != "Secure connection (SSL)" or row[1]]
     s = r.server or {}
     home = s.get("home") or {}
-    rows = []
     dns_ms = (r.dns or {}).get("auth_ms")
     if dns_ms is None and r.page:
         dns_ms = r.page.timing.dns
     rows.append(("Finding the server (DNS)", dns_ms or 0, "dns"))
-    redirect_ms = (r.redirects or {}).get("redirect_ms") or 0
     if redirect_ms:
         rows.append(("Redirects", redirect_ms, "redirect"))
     rows.append(("Connecting", home.get("rtt") or 0, "network"))
     if home.get("tls"):
         rows.append(("Secure connection (SSL)", home["tls"], "network"))
-    rows.append(("Request travelling to the server and back", home.get("rtt") or 0, "network"))
-    rows.append(("Server preparing the page", home.get("think") or 0, "server"))
+    rows.append(("Waiting for the server to answer", home.get("wait") or 0, "server"))
     rows.append(("Downloading the page", home.get("download") or 0, "network"))
-    d = (r.browser or {}).get("desktop") or {}
-    if d and not d.get("error") and d.get("lcp"):
-        nav = d.get("nav") or {}
-        rest = d["lcp"] - (nav.get("responseEnd") or 0)
-        rows.append(("Loading images, CSS & JavaScript and drawing the page", max(0, rest), "frontend"))
     return rows
 
 
@@ -260,6 +270,28 @@ def diagnose(r):
     desktop = (r.browser or {}).get("desktop") or {}
     m_lcp = mobile.get("lcp") if not mobile.get("error") else None
     d_lcp = desktop.get("lcp") if not desktop.get("error") else None
+    phone = mobile if m_lcp else desktop if d_lcp else {}
+    if phone:
+        m_nav = phone.get("nav") or {}
+        html_ms = (m_nav.get("responseEnd") or 0) - (m_nav.get("ttfb") or 0)
+        if html_ms > 2000:
+            causes.append(("Downloading the page itself", html_ms,
+                           f"After the server starts answering, the HTML of the page takes {secs(html_ms)} to arrive "
+                           f"in the browser ({'phone' if phone is mobile else 'desktop'} test). The page is either very "
+                           "large or the server sends it slowly in pieces - check the HTML size and that compression "
+                           "is on."))
+        tbt = phone.get("tbt") or 0
+        if tbt > 600:
+            causes.append(("JavaScript", tbt,
+                           f"JavaScript freezes the {'phone' if phone is mobile else 'computer'} for {secs(tbt)} while the "
+                           "page loads, so it can't draw the page or respond to taps. See \"Who uses the processor\" in "
+                           "the Plugins section for which scripts are responsible, then remove or delay them."))
+        cls = phone.get("cls") or 0
+        if cls > 0.25:
+            causes.append(("Page jumping around", cls * 2000,
+                           f"The layout shifts a lot as it loads (CLS {cls:.2f}; Google wants under 0.1). Popups, cookie "
+                           "banners, adverts and images without a set size are the usual causes - the report lists the "
+                           "elements that moved."))
     if m_lcp:
         front = m_lcp - ((mobile.get("nav") or {}).get("responseEnd") or 0)
         if front > 1500:
@@ -287,7 +319,12 @@ def diagnose(r):
         speed.append(f"on a desktop PC after {secs(d_lcp)}")
     if speed:
         paragraphs.append("Measured in a real browser: " + " and ".join(speed) + ". Google's target is 2.5 s.")
-    if not causes:
+    slow = (m_lcp or 0) > 4000 or (d_lcp or 0) > 2500
+    if not causes and slow:
+        headline = "The page is slow to appear in the browser"
+        paragraphs.append("No single big cause stood out - the delay is spread across many smaller problems. Work "
+                          "through the \"Fix these first\" list below.")
+    elif not causes:
         headline = "No major speed problems found"
         if think is not None:
             paragraphs.append(f"The server answers quickly ({secs(think)}), and the page loads well. See the details "

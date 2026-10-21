@@ -210,7 +210,9 @@ CSS_IMPORT = re.compile(r"@import\s+(?:url\()?\s*['\"]?([^'\")\s;]+)", re.I)
 
 
 def fetch_assets(assets, progress=None, workers=4, cancelled=None):
-    """Download every file the page uses (and fonts/images the CSS uses). Fills in asset.resp."""
+    """Download every file the page uses (and stylesheets the CSS @imports). Fills in asset.resp.
+    Fonts aren't fetched from the CSS: browsers only download the ones the page really uses, so the real browser
+    test counts those."""
     def get(asset):
         if cancelled and cancelled():
             return asset
@@ -234,13 +236,6 @@ def fetch_assets(assets, progress=None, workers=4, cancelled=None):
         css = a.resp.text
         a.extra["imports"] = [urljoin(a.url, u) for u in CSS_IMPORT.findall(css)]
         a.extra["font_display"] = "font-display" in css
-        # Browsers only download the best font format they support (woff2), so count just those if there are any
-        fonts = [urljoin(a.url, r.strip()) for r in CSS_URL.findall(css) if kind_of(r.strip()) == "font"]
-        woff2 = [u for u in fonts if urlsplit(u).path.lower().endswith(".woff2")]
-        for url in woff2 or fonts:
-            if url not in seen and len(assets) + len(extra) < MAX_ASSETS:
-                seen.add(url)
-                extra.append(Asset(url, "font", source="css"))
         for url in a.extra["imports"]:
             if url not in seen:
                 seen.add(url)
@@ -257,15 +252,18 @@ def _max_age(cache_control):
     return int(m.group(1)) if m else None
 
 
-def analyze(page, parser, assets, site_host, error_category="server"):
-    """Findings about page weight, images, scripts, styles, fonts, caching headers, third parties."""
+def analyze(page, parser, assets, site_host, browser_data=None):
+    """Findings about page weight, images, scripts, styles, fonts, caching headers, third parties.
+    browser_data (the real browser run) gives the true totals, including files loaded by scripts."""
     findings = []
     stats = {}
     ok_assets = [a for a in assets if not a.failed]
     html_transfer = page.transfer_size
-    total = html_transfer + sum(a.transfer for a in ok_assets)
-    stats.update(html_bytes=len(page.body), html_transfer=html_transfer, total_bytes=total,
-                 requests=1 + len(assets))
+    real = browser_data if browser_data and not browser_data.get("error") and browser_data.get("requests") else None
+    total = real["total_bytes"] if real else html_transfer + sum(a.transfer for a in ok_assets)
+    n = len(real["requests"]) if real else len(assets) + 1
+    stats.update(html_bytes=len(page.body), html_transfer=html_transfer, total_bytes=total, requests=n,
+                 measured_in_browser=bool(real))
     by_kind = {}
     for a in ok_assets:
         k = by_kind.setdefault(a.kind, [0, 0])
@@ -288,7 +286,6 @@ def analyze(page, parser, assets, site_host, error_category="server"):
     else:
         findings.append(Finding("content", GOOD, f"Page size is reasonable ({kb(total)})"))
 
-    n = len(assets) + 1
     if n > 120:
         findings.append(Finding("content", CRITICAL, f"Too many files ({n} requests)",
                                 "Every file is another request. Pages with this many files are almost always slowed by "
@@ -467,13 +464,17 @@ def analyze(page, parser, assets, site_host, error_category="server"):
                    sorted(third.items(), key=lambda x: -x[1][1])[:20]]))
 
     # Fonts
-    fonts = [a for a in assets if a.kind == "font"]
-    google_fonts = any("fonts.googleapis.com" in a.url for a in assets)
+    if real:
+        fonts = [(r["url"], r["size"]) for r in real["requests"] if r.get("type") == "Font"]
+    else:
+        fonts = [(a.url, a.transfer) for a in assets if a.kind == "font"]
+    google_fonts = any("fonts.googleapis.com" in a.url for a in assets) or \
+        any("fonts.googleapis.com" in r["url"] for r in (real or {}).get("requests", []))
     if len(fonts) > 6:
         findings.append(Finding("content", WARNING, f"{len(fonts)} font files",
                                 "Each font weight/style is a separate download that can hold up text appearing.",
                                 "Use fewer font weights (most sites need 2-3) and one or two font families.",
-                                impact=len(fonts) * 20, items=[short_url(a.url) for a in fonts[:15]]))
+                                impact=len(fonts) * 20, items=[f"{kb(size)} - {short_url(url)}" for url, size in fonts[:15]]))
     if google_fonts:
         findings.append(Finding("content", INFO, "Fonts are loaded from Google Fonts",
                                 "That's an extra connection to Google before text can show (and in the UK/EU it "

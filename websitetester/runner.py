@@ -249,7 +249,8 @@ class Runner:
             assets, cancelled=self.cancelled,
             progress=lambda done, total: self.progress(f"Downloading files ({done} of {total})", done / max(total, 1), weight))
         r.assets = assets
-        findings, r.content = pagecheck.analyze(r.page, r.parser, assets, r.site_host)
+        findings, r.content = pagecheck.analyze(r.page, r.parser, assets, r.site_host,
+                                                browser_data=(r.browser or {}).get("desktop"))
         self.add(findings)
 
     def _wordpress(self, weight):
@@ -370,7 +371,9 @@ def plain_text_summary(r):
     for name in ("desktop", "mobile"):
         d = (r.browser or {}).get(name)
         if d and not d.get("error"):
-            lines.append(f"Browser {name}: LCP {d.get('lcp') or 0:.0f} ms, FCP {d.get('fcp') or 0:.0f} ms, "
+            nav = d.get("nav") or {}
+            lines.append(f"Browser {name}: TTFB {nav.get('ttfb') or 0:.0f} ms, HTML done {nav.get('responseEnd') or 0:.0f} ms, "
+                         f"LCP {d.get('lcp') or 0:.0f} ms, FCP {d.get('fcp') or 0:.0f} ms, "
                          f"CLS {d.get('cls') or 0:.3f}, TBT {d.get('tbt') or 0:.0f} ms, "
                          f"{len(d.get('requests') or [])} requests, {d.get('total_bytes', 0) // 1024} KB")
         elif d:
