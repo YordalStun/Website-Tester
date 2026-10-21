@@ -2,7 +2,7 @@
 
     WebsiteTester.exe                                   the normal window
     WebsiteTester.exe --selftest                        prove the build works (tests a fake site on this PC)
-    WebsiteTester.exe example.com --report out.html [--text out.txt] [--no-browser] [--no-pagespeed]
+    WebsiteTester.exe example.com --report out.html [--text out.txt] [--export out.md] [--no-browser] [--no-pagespeed]
 """
 import os
 import sys
@@ -45,6 +45,10 @@ def selftest():
             notes.append("no browser found - browser test not checked")
         html = report.html_report(r)
         assert "Fix these first" in html and r.domain in html
+        from .export import ai_export
+        text = ai_export(r)
+        assert "## Findings" in text and "## Every file the page uses" in text
+        assert "/9j/" not in text, "screenshots must not be in the export"  # base64 JPEG data
         steps.append("report")
 
         import dns.rdata
@@ -83,7 +87,7 @@ def command_line(args):
             del args[i:i + 2]
             return value
         return None
-    html_out, text_out = take("--report"), take("--text")
+    html_out, text_out, export_out = take("--report"), take("--text"), take("--export")
     options = runner.Options()
     for flag, attr in (("--no-browser", "browser"), ("--no-mobile", "mobile"), ("--no-pagespeed", "pagespeed"),
                        ("--no-updates", "check_updates")):
@@ -99,6 +103,9 @@ def command_line(args):
         Path(html_out).write_text(report.html_report(r), encoding="utf-8")
     if text_out:
         Path(text_out).write_text(text, encoding="utf-8")
+    if export_out:
+        from .export import ai_export
+        Path(export_out).write_text(ai_export(r), encoding="utf-8")
     print(text)
     return 0
 

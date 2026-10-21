@@ -159,7 +159,11 @@ def test_full_run_against_fake_site(monkeypatch):
     assert s["home"]["think"] >= 150 and s["static"]["think"] < 100 and s["wp_backend"]["think"] >= 150
     assert r.diagnosis["headline"] == "Main problem: WordPress (no page cache)"
     assert "it's the WordPress side" in r.diagnosis["paragraphs"][0]
-    from websitetester import report
+    from websitetester import export, report
+    text = export.ai_export(r)
+    for section in ("## About this file", "## Findings", "## Every file the page uses", "## WordPress, theme and plugins"):
+        assert section in text
+    assert "Slider Revolution" in text and "/wp-content/plugins/revslider/" in text
     html = report.html_report(r)
     assert "Fix these first" in html and "Slider Revolution" in html
     assert "<script" not in report.summary_html(r)

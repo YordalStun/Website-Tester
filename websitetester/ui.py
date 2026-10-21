@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                                QProgressBar, QPushButton, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget)
 
-from . import APP_NAME, VERSION, browser, report, runner
+from . import APP_NAME, VERSION, browser, export, report, runner
 
 STYLE = """
 QWidget { color: #1f2329; }
@@ -230,14 +230,19 @@ class MainWindow(QMainWindow):
         self.open_button.clicked.connect(self.open_report)
         self.save_button = QPushButton("Save a copy...")
         self.save_button.clicked.connect(self.save_copy)
+        self.export_button = QPushButton("Export for AI...")
+        self.export_button.setToolTip("Save everything this test measured in one text file you can give to an AI "
+                                      "assistant (or a developer) to analyse. Nothing is sent anywhere.")
+        self.export_button.clicked.connect(self.export_for_ai)
         folder_button = QPushButton("Reports folder")
         folder_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(reports_folder()))))
         self.log_button = QPushButton("Show test log")
         self.log_button.clicked.connect(self.toggle_log)
-        for b in (self.open_button, self.save_button):
+        for b in (self.open_button, self.save_button, self.export_button):
             b.setEnabled(False)
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.save_button)
+        buttons.addWidget(self.export_button)
         buttons.addWidget(folder_button)
         buttons.addStretch()
         buttons.addWidget(self.log_button)
@@ -292,6 +297,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(True)
         self.open_button.setEnabled(False)
         self.save_button.setEnabled(False)
+        self.export_button.setEnabled(False)
         self.thread = TestThread(target, options)
         self.thread.progressed.connect(self.on_progress)
         self.thread.finished_ok.connect(self.on_done)
@@ -334,6 +340,7 @@ class MainWindow(QMainWindow):
             self.log.appendPlainText(line)
         self.open_button.setEnabled(bool(self.report_path))
         self.save_button.setEnabled(True)
+        self.export_button.setEnabled(True)
         if self.report_path and self.opt_open.isChecked():
             self.open_report()
 
@@ -354,6 +361,16 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Save report", default, "Web page (*.html)")
         if path:
             Path(path).write_text(report.html_report(self.result), encoding="utf-8")
+
+    def export_for_ai(self):
+        if not self.result:
+            return
+        safe = re.sub(r"[^a-zA-Z0-9.\-]+", "_", self.result.domain)
+        default = str(reports_folder() / f"{safe} {self.result.started:%Y-%m-%d %H%M} for AI.md")
+        path, _ = QFileDialog.getSaveFileName(self, "Export for AI", default, "Text file for AI (*.md);;Text file (*.txt)")
+        if path:
+            Path(path).write_text(export.ai_export(self.result), encoding="utf-8")
+            self.status.setText(f"Exported everything to {path} - you can attach that file in any AI chat.")
 
     def closeEvent(self, event):
         if self.thread:
