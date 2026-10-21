@@ -1,5 +1,14 @@
 # Website Tester
 
+Two tools from JJ Hosting for finding out why a website is slow:
+
+- **Website Tester for Windows** tests any website from the outside, the way a visitor sees it.
+- **Speed Inspector**, a WordPress plugin, tests a WordPress site from the inside and measures exactly how long each plugin adds to every page (see [Speed Inspector](#speed-inspector-wordpress-plugin) below).
+
+Both have an **Export for AI** button. It saves everything the test measured in one text file, which you can attach in any AI chat (or send to a developer) for a second opinion. Neither tool connects to an AI itself, and nothing is sent anywhere.
+
+## Website Tester for Windows
+
 A Windows app from JJ Hosting. Type in a website address and press **Test website**. It works out why the site is slow and tells you how to fix each problem. It checks whether the slowness comes from the server, DNS, WordPress, a plugin, the theme, images or code.
 
 A full test takes about 1-2 minutes. The app then shows a summary and opens a full report in your web browser. Every report is also saved in `Documents\Website Tester Reports`.
@@ -12,6 +21,7 @@ GitHub builds, tests and publishes the Windows app automatically every time the 
 2. Open **Latest build** and download one of these:
    - `WebsiteTester.exe`: a single file. Put it anywhere and double-click it.
    - `WebsiteTester-folder.zip`: the same app as a folder. It starts a bit faster. Unzip it and run `WebsiteTester.exe` inside.
+   - `jj-speed-inspector.zip`: the WordPress plugin (see below).
 
 > **"Windows protected your PC"?** This message appears because the app isn't code-signed. Click **More info**, then **Run anyway**. You only need to do this once.
 
@@ -95,6 +105,18 @@ It also gives specific advice for plugins known to be heavy, such as Slider Revo
 
 **Google PageSpeed.** Google's own score, plus **real-visitor speed data** from Chrome users when the site gets enough traffic.
 
+### Export for AI
+
+After a test, click **Export for AI...** to save a `.md` text file containing:
+- the diagnosis and every finding
+- the redirect chain and response headers
+- the DNS and server timing samples
+- every file the page uses
+- the WordPress plugins found
+- both browser runs (every request, the Core Web Vitals and JavaScript errors)
+
+Attach the file in an AI chat and ask it what to fix first. Screenshots, passwords and personal data are not included.
+
 ### Options
 
 - **Real browser test** and **Phone test**: untick these for a quicker test.
@@ -110,15 +132,46 @@ Results depend a little on where you run the test from and on how busy the serve
 ## Command line
 
 ```
-WebsiteTester.exe example.com --report report.html --text report.txt [--no-browser] [--no-mobile] [--no-pagespeed] [--no-updates]
+WebsiteTester.exe example.com --report report.html --text report.txt --export for-ai.md [--no-browser] [--no-mobile] [--no-pagespeed] [--no-updates]
 WebsiteTester.exe --selftest
 ```
+
+## Speed Inspector (WordPress plugin)
+
+Speed Inspector works from inside WordPress, so it can measure things no outside test can see. Supports PHP 7.4.33 and newer, and WordPress 5.8 and newer.
+
+**Installing:** download `jj-speed-inspector.zip` from **Releases > Latest build**. In WordPress, go to **Plugins > Add New > Upload Plugin**, choose the zip, then click **Install Now** and **Activate**. Then open **Tools > Speed Inspector** and press **Run speed test**.
+
+**What it does:** it visits the site's own pages as a logged-out visitor, several times each, with the page cache skipped. It tests the home page, the newest post, a page, the shop (if WooCommerce is installed) and any page you add. During those visits it records:
+- **how long each plugin and the theme add to every page**, including the time spent loading their files and running their actions/filters. For example: "Slider Revolution adds 420 ms to every page (38%)".
+- **every database query**, and which plugin ran it, so slow queries can be traced to their plugin
+- **every call to another website** while building a page, and which plugin made it (licence checks, feeds and APIs are classic hidden causes of slow sites)
+- **PHP warnings and errors**, and which plugin caused them
+- **whether page caching actually works**, by comparing a normal visit with a page built from scratch
+
+It also checks:
+- **the server:** PHP version, OPcache, memory limit, a processor speed test compared with a typical good host, database speed and version, and disk space
+- **the database:** autoloaded options (with the plugins they probably belong to), huge tables, old MyISAM tables, expired transients, revisions, spam and orphaned data
+- **caching:** object cache (and whether Redis is available but unused), and more than one caching plugin active at once
+- **scheduled tasks:** overdue WP-Cron jobs, WP-Cron switched off with no real cron, very frequent tasks, tasks left behind by deleted plugins, and stuck Action Scheduler queues
+- **settings and updates:** debug mode left on, huge error logs, unlimited revisions, and outdated plugins, theme or WordPress
+
+The result is a grade, a "Main problem: ..." diagnosis, a breakdown of where the time goes, a time-per-plugin table and a "Fix these first" list. **Export for AI (.md file)** downloads all of it, including the raw measurements from every test visit.
+
+**Safety:**
+- Profiling only switches on for test visits that carry a one-time secret key, so normal visitors are never affected.
+- A tiny early loader in `wp-content/mu-plugins` lets it time how long plugins take to load. That loader does nothing unless a test is running.
+- Deactivating the plugin removes the loader, and deleting the plugin removes everything it stored.
+- If the host blocks the site from calling itself, your browser makes the test visits instead.
+
+**WP-CLI:** `wp speed-inspector run [--page=<url>] [--export=<file>] [--format=json]`
 
 ## For developers
 
 - Python 3.12, PySide6 for the window. dnspython handles DNS, and websocket-client talks to Edge/Chrome over the DevTools protocol (the same way Google Lighthouse does).
 - `python run.py` starts the app. `python -m pytest` runs the tests: they use a deliberately badly set-up fake WordPress site (`websitetester/fakesite.py`), plus the real-browser test when Edge, Chrome or Chromium is installed.
 - `build.bat` builds `dist\WebsiteTester.exe` on a Windows PC.
+- The WordPress plugin is in `wordpress-plugin/jj-speed-inspector`. The **WordPress plugin** workflow tests it on PHP 7.4 + WordPress 5.8, PHP 7.4 + the latest WordPress, and PHP 8.3 + the latest WordPress. Each test runs against a deliberately slow test plugin (`wordpress-plugin/tests/slowpoke`), drives the real admin page in a browser, checks the browser fallback for when the site can't call itself, and checks that uninstalling cleans up.
 - On every push, GitHub Actions:
   1. runs the tests
   2. builds the `.exe`

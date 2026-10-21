@@ -1,0 +1,114 @@
+name: WordPress plugin
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }} / WordPress ${{ matrix.wp }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - php: "7.4"
+            wp: "5.8"
+          - php: "7.4"
+            wp: "latest"
+          - php: "8.3"
+            wp: "latest"
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wp
+        ports: ["3306:3306"]
+        options: --health-cmd="mysqladmin ping -proot" --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mysqli, opcache
+          tools: none
+          coverage: none
+
+      - name: Check every file is valid PHP ${{ matrix.php }}
+        run: find wordpress-plugin -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Set up WordPress ${{ matrix.wp }}
+        run: |
+          curl -sSLo wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          WP="php $PWD/wp-cli.phar"
+          mkdir site && cd site
+          $WP core download --version=${{ matrix.wp }} --quiet
+          $WP config create --dbname=wp --dbuser=root --dbpass=root --dbhost=127.0.0.1 --skip-check
+          $WP config set DISABLE_WP_CRON true --raw
+          $WP core install --url=http://127.0.0.1:8899 --title="CI site" --admin_user=admin --admin_password=admin --admin_email=admin@example.com --skip-email
+          $WP post generate --count=10 --quiet
+          $WP post create --post_type=page --post_status=publish --post_title="About us" --quiet
+          cp -r ../wordpress-plugin/jj-speed-inspector wp-content/plugins/
+          cp -r ../wordpress-plugin/tests/slowpoke wp-content/plugins/
+          if [ "${{ matrix.wp }}" = "latest" ]; then $WP plugin install contact-form-7 wordpress-seo --activate; fi
+          $WP plugin activate jj-speed-inspector slowpoke
+          test -f wp-content/mu-plugins/0-jj-speed-inspector.php
+          $WP core version
+
+      - name: Start the web server and a slow outside service
+        run: |
+          python3 wordpress-plugin/tests/slow_api.py &
+          cd site
+          PHP_CLI_SERVER_WORKERS=6 nohup php -S 127.0.0.1:8899 > ../server.log 2>&1 &
+          sleep 2
+          curl -sf -o /dev/null http://127.0.0.1:8899/
+
+      - name: Run Speed Inspector (WP-CLI)
+        run: |
+          cd site
+          php ../wp-cli.phar speed-inspector run --export=../export.md | tee ../result.txt
+          grep -q "Main problem: Slowpoke" ../result.txt
+          grep -q "Pages wait for other websites" ../result.txt
+          grep -q "slow database quer" ../result.txt
+          grep -q "Lots of data is loaded on every page" ../result.txt
+          grep -q "scheduled tasks are overdue" ../result.txt
+          grep -q "## Raw measurements" ../export.md
+
+      - name: Admin page in a real browser
+        run: |
+          python3 -m pip install --quiet playwright
+          python3 -m playwright install --with-deps chromium > /dev/null
+          python3 wordpress-plugin/tests/admin_ui_test.py http://127.0.0.1:8899 admin admin ui
+
+      - name: Browser fallback when the host blocks the site calling itself
+        run: |
+          cp wordpress-plugin/tests/block-loopback.php site/wp-content/mu-plugins/
+          (cd site && php ../wp-cli.phar option update jjsi_test_block_loopback 1)
+          python3 wordpress-plugin/tests/admin_ui_test.py http://127.0.0.1:8899 admin admin ui-blocked
+          grep -q '"total_ms"' ui-blocked/*.md
+          rm site/wp-content/mu-plugins/block-loopback.php
+
+      - name: Uninstalling leaves nothing behind
+        run: |
+          cd site
+          php ../wp-cli.phar plugin deactivate jj-speed-inspector
+          test ! -f wp-content/mu-plugins/0-jj-speed-inspector.php
+          php ../wp-cli.phar plugin uninstall jj-speed-inspector
+          test "$(php ../wp-cli.phar option list --search='jjsi_*' --format=count)" = "0"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: plugin-test-php${{ matrix.php }}-wp${{ matrix.wp }}
+          path: |
+            result.txt
+            export.md
+            server.log
+            ui/
+            ui-blocked/
