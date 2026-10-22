@@ -102,6 +102,9 @@
 		if (step['do'] === 'profile') {
 			return 'Measuring everything WordPress does on ' + step.url;
 		}
+		if (step['do'] === 'baseline') {
+			return 'Timing how fast the server reaches its own website';
+		}
 		if (step['do'] === 'checks') {
 			return 'Checking the server, database, caching and scheduled tasks';
 		}

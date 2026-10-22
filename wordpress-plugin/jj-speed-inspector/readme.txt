@@ -4,7 +4,7 @@ Tags: performance, speed, profiler, slow, diagnostics
 Requires at least: 5.8
 Tested up to: 7.2
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 1.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -38,6 +38,16 @@ nothing unless a test is running, and is removed when Speed Inspector is deactiv
 WP-CLI: `wp speed-inspector run [--page=<url>] [--export=<file>] [--format=json]`
 
 == Changelog ==
+
+= 1.1.0 =
+* Measures how long the server takes to reach its own website, and corrects "normal visit" times for it.
+* WP-Cron calls to the site itself are reported as scheduled tasks making visitors wait, not as "other websites".
+* Page caching is only counted as on when it really runs (a leftover advanced-cache.php with WP_CACHE off doesn't count).
+* Detects permalinks being rebuilt on every page load, and finds the code that does it.
+* Shows what fills a huge database (post types and metadata), and tables/settings left by removed plugins.
+* WordPress's own scheduled tasks are no longer listed as orphans.
+* PHP warnings inside WordPress's files are blamed on the plugin or theme that caused them.
+* The one-time test key is removed from the export file.
 
 = 1.0.0 =
 * First version.

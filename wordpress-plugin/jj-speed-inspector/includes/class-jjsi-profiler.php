@@ -45,6 +45,7 @@ class JJSI_Profiler {
 	private static $self_dir    = '';
 	private static $prev_error_handler = null;
 	private static $linked = null;
+	private static $rewrite_rebuilt = 0;
 
 	/**
 	 * Is this request a valid Speed Inspector test? Checks the one-time key.
@@ -90,6 +91,7 @@ class JJSI_Profiler {
 		add_filter( 'pre_http_request', array( __CLASS__, 'on_http_start' ), PHP_INT_MAX, 3 );
 		add_action( 'http_api_debug', array( __CLASS__, 'on_http_end' ), 10, 5 );
 		add_filter( 'template_include', array( __CLASS__, 'on_template' ), PHP_INT_MAX );
+		add_filter( 'rewrite_rules_array', array( __CLASS__, 'on_rewrite_rules' ), PHP_INT_MAX );
 		add_action( 'shutdown', array( __CLASS__, 'finish' ), PHP_INT_MAX );
 		foreach ( array( 'muplugins_loaded', 'plugins_loaded', 'setup_theme', 'after_setup_theme', 'init', 'wp_loaded', 'wp', 'template_redirect', 'wp_head', 'wp_footer' ) as $phase ) {
 			add_action( $phase, array( __CLASS__, 'on_phase' ), PHP_INT_MIN );
@@ -315,7 +317,7 @@ class JJSI_Profiler {
 	}
 
 	/** The first plugin/theme in the current call stack (for queries, HTTP calls and errors). */
-	private static function owner_from_backtrace( $skip_files = 0 ) {
+	private static function owner_from_backtrace() {
 		$trace = debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS, 40 ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions
 		foreach ( $trace as $frame ) {
 			if ( empty( $frame['file'] ) ) {
@@ -381,7 +383,7 @@ class JJSI_Profiler {
 					'type'    => isset( $types[ $errno ] ) ? $types[ $errno ] : 'Error',
 					'message' => substr( (string) $errstr, 0, 300 ),
 					'file'    => str_replace( wp_normalize_path( ABSPATH ), '', wp_normalize_path( (string) $errfile ) ) . ':' . $errline,
-					'owner'   => self::owner_of_file( $errfile ),
+					'owner'   => self::error_owner( $errfile ),
 					'count'   => 0,
 				);
 			}
@@ -391,6 +393,30 @@ class JJSI_Profiler {
 			return call_user_func( self::$prev_error_handler, $errno, $errstr, $errfile, $errline );
 		}
 		return false; // let PHP handle it as normal
+	}
+
+	/**
+	 * The rewrite rules (permalinks) were rebuilt during this page load. Normal page loads read them from the
+	 * database; rebuilding should only happen when permalink settings change.
+	 */
+	public static function on_rewrite_rules( $rules ) {
+		self::$rewrite_rebuilt++;
+		return $rules;
+	}
+
+	/**
+	 * Warnings raised inside WordPress's own files are almost always caused by a plugin or theme passing it bad
+	 * data, so blame the first plugin/theme in the call stack.
+	 */
+	private static function error_owner( $errfile ) {
+		$owner = self::owner_of_file( $errfile );
+		if ( 'core' === $owner ) {
+			$caller = self::owner_from_backtrace();
+			if ( 'core' !== $caller ) {
+				return $caller;
+			}
+		}
+		return $owner;
 	}
 
 	public static function on_template( $template ) {
@@ -465,6 +491,7 @@ class JJSI_Profiler {
 			'object_cache' => wp_using_ext_object_cache(),
 			'is_404'      => function_exists( 'is_404' ) && is_404(),
 			'hooks_seen'  => count( self::$hook_counts ),
+			'rewrite_rebuilt' => self::$rewrite_rebuilt,
 		);
 		set_transient( 'jjsi_result_' . self::$run_id, $result, 30 * MINUTE_IN_SECONDS );
 	}

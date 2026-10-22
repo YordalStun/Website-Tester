@@ -36,6 +36,35 @@ add_action(
 	}
 );
 
+// Rebuilds the permalinks on every page load (a common plugin/theme mistake).
+add_action(
+	'init',
+	function () {
+		if ( ! is_admin() ) {
+			flush_rewrite_rules();
+		}
+	},
+	20
+);
+
+// A background task every minute (like Action Scheduler's queue runner), so WP-Cron is due on most page loads.
+add_filter(
+	'cron_schedules',
+	function ( $schedules ) {
+		$schedules['slowpoke_every_minute'] = array( 'interval' => 60, 'display' => 'Every minute' );
+		return $schedules;
+	}
+);
+add_action(
+	'init',
+	function () {
+		if ( ! wp_next_scheduled( 'slowpoke_every_minute_task' ) ) {
+			wp_schedule_event( time(), 'slowpoke_every_minute', 'slowpoke_every_minute_task' );
+		}
+	}
+);
+add_action( 'slowpoke_every_minute_task', '__return_true' );
+
 // Lots of autoloaded data and an overdue scheduled task.
 register_activation_hook(
 	__FILE__,

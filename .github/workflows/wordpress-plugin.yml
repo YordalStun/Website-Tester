@@ -53,6 +53,7 @@ jobs:
           # WP-CLI adds the folder name to the address; the web server serves this folder at the root
           $WP option update home http://127.0.0.1:8899
           $WP option update siteurl http://127.0.0.1:8899
+          $WP rewrite structure '/%postname%/'
           $WP post generate --count=10 --quiet
           $WP post create --post_type=page --post_status=publish --post_title="About us" --quiet
           cp -r ../wordpress-plugin/jj-speed-inspector wp-content/plugins/
@@ -83,6 +84,22 @@ jobs:
           grep -q "Lots of data is loaded on every page" ../result.txt
           grep -q "scheduled tasks are overdue" ../result.txt
           grep -q "## Raw measurements" ../export.md
+
+      - name: A server that is slow to reach itself, with WP-Cron on page visits (like a real site we tested)
+        run: |
+          cp wordpress-plugin/tests/slow-loopback.php site/wp-content/mu-plugins/
+          cd site
+          WP="php ../wp-cli.phar"
+          $WP option update jjsi_test_slow_loopback 1500
+          $WP config set DISABLE_WP_CRON false --raw
+          $WP speed-inspector run --export=../export-slow-self.md | tee ../result-slow-self.txt
+          grep -q "Main problem: Scheduled tasks (WP-Cron) making visitors wait" ../result-slow-self.txt
+          grep -q "slow to reach its own website" ../result-slow-self.txt
+          grep -q "Permalinks are rebuilt on every page load" ../result-slow-self.txt
+          grep -q "plugins/slowpoke/slowpoke.php" ../export-slow-self.md
+          $WP option delete jjsi_test_slow_loopback
+          $WP config set DISABLE_WP_CRON true --raw
+          rm wp-content/mu-plugins/slow-loopback.php
 
       - name: Admin page in a real browser
         run: |
@@ -116,6 +133,8 @@ jobs:
           path: |
             result.txt
             export.md
+            result-slow-self.txt
+            export-slow-self.md
             server.log
             ui/
             ui-blocked/

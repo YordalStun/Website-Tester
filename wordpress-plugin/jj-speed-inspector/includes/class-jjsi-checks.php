@@ -41,6 +41,58 @@ class JJSI_Checks {
 		return array( 'data' => self::$data, 'findings' => self::$findings );
 	}
 
+	/**
+	 * Where active plugins and the theme call a function (e.g. flush_rewrite_rules). Returns "Name: file:line" items.
+	 *
+	 * @param string $needle Text to look for.
+	 */
+	public static function find_code( $needle, $limit = 20 ) {
+		$names = self::plugin_names();
+		$dirs  = array();
+		foreach ( (array) get_option( 'active_plugins', array() ) as $file ) {
+			$folder = dirname( $file );
+			if ( '.' !== $folder && basename( JJSI_DIR ) !== $folder ) {
+				$dirs[ isset( $names[ $folder ] ) ? $names[ $folder ] : $folder ] = WP_PLUGIN_DIR . '/' . $folder;
+			}
+		}
+		$theme = wp_get_theme();
+		$dirs[ $theme->get( 'Name' ) . ' (theme)' ] = $theme->get_stylesheet_directory();
+		if ( $theme->parent() ) {
+			$dirs[ $theme->parent()->get( 'Name' ) . ' (theme)' ] = $theme->get_template_directory();
+		}
+		$found   = array();
+		$scanned = 0;
+		foreach ( $dirs as $label => $dir ) {
+			if ( ! is_dir( $dir ) ) {
+				continue;
+			}
+			try {
+				$files = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $dir, FilesystemIterator::SKIP_DOTS ) );
+				foreach ( $files as $file ) {
+					$path = wp_normalize_path( $file->getPathname() );
+					if ( 'php' !== strtolower( $file->getExtension() ) || $file->getSize() > 1048576 || preg_match( '#/(vendor|node_modules|tests?)/#', $path ) ) {
+						continue;
+					}
+					if ( ++$scanned > 6000 ) {
+						break 2;
+					}
+					$code = (string) @file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions,WordPress.PHP.NoSilencedErrors
+					$pos  = strpos( $code, $needle );
+					if ( false !== $pos ) {
+						$line    = substr_count( substr( $code, 0, $pos ), "\n" ) + 1;
+						$found[] = $label . ': ' . str_replace( wp_normalize_path( WP_CONTENT_DIR ) . '/', '', $path ) . ':' . $line;
+						if ( count( $found ) >= $limit ) {
+							break 2;
+						}
+					}
+				}
+			} catch ( Exception $e ) {
+				continue;
+			}
+		}
+		return $found;
+	}
+
 	public static function bytes( $bytes ) {
 		if ( $bytes >= 1073741824 ) {
 			return round( $bytes / 1073741824, 1 ) . ' GB';
@@ -67,8 +119,38 @@ class JJSI_Checks {
 		if ( '' === $owner ) {
 			return '';
 		}
-		return isset( $names[ $owner ] ) ? $names[ $owner ] : $owner;
+		if ( isset( $names[ $owner ] ) ) {
+			return $names[ $owner ];
+		}
+		$theme = wp_get_theme();
+		if ( in_array( $owner, array( $theme->get_stylesheet(), $theme->get_template() ), true ) || false !== strpos( $owner, ' / ' ) ) {
+			return $owner;
+		}
+		return $owner . ' - not installed any more (left over)';
 	}
+
+	/** Scheduled tasks that belong to WordPress itself (their code only loads when cron or the admin runs). */
+	const CORE_CRON = array(
+		'wp_version_check', 'wp_update_plugins', 'wp_update_themes', 'wp_scheduled_delete', 'wp_scheduled_auto_draft_delete',
+		'delete_expired_transients', 'wp_privacy_delete_old_export_files', 'wp_site_health_scheduled_check',
+		'recovery_mode_clean_expired_keys', 'wp_delete_temp_updater_backups', 'wp_https_detection', 'wp_update_user_counts',
+		'wp_maybe_auto_update', 'wp_update_comment_type_batch', 'importer_scheduled_cleanup', 'upgrader_scheduled_cleanup',
+		'wp_split_shared_term_batch', 'do_pings', 'publish_future_post', 'wp_batch_split_terms',
+	);
+
+	/** Built-in post types - anything else with tens of thousands of entries is worth naming. */
+	const CORE_POST_TYPES = array( 'post', 'page', 'attachment', 'revision', 'nav_menu_item', 'custom_css', 'customize_changeset', 'oembed_cache', 'user_request', 'wp_block', 'wp_template', 'wp_template_part', 'wp_global_styles', 'wp_navigation', 'wp_font_family', 'wp_font_face' );
+
+	/** Post types plugins use to store submissions, logs and so on. */
+	const POST_TYPE_OWNERS = array(
+		'wpcf7s' => 'Contact Form Submissions (saved form entries, including spam)', 'flamingo_inbound' => 'Flamingo (saved form entries)',
+		'flamingo_contact' => 'Flamingo', 'shop_order' => 'WooCommerce orders', 'shop_order_placehold' => 'WooCommerce orders',
+		'scheduled-action' => 'Action Scheduler (old background jobs)', 'wpforms_log' => 'WPForms logs', 'mc4wp-form' => 'Mailchimp for WP',
+		'ozy_project' => 'BuildMe theme projects', 'product' => 'WooCommerce products', 'product_variation' => 'WooCommerce product variations',
+		'elementor_library' => 'Elementor templates', 'wpcf7_contact_form' => 'Contact Form 7 forms', 'nf_sub' => 'Ninja Forms submissions',
+		'cfdb7' => 'Contact Form 7 Database', 'jetpack_feedback' => 'Jetpack form responses', 'feedback' => 'Jetpack form responses',
+		'ml-slider' => 'MetaSlider', 'acf-field' => 'Advanced Custom Fields', 'wp_log' => 'a logging plugin', 'cs_log' => 'a logging plugin',
+	);
 
 	// ----------------------------------------------------------------------------------------------------
 	// Server and PHP
@@ -235,8 +317,15 @@ class JJSI_Checks {
 				$caching[] = JJSI_Known::$cache_plugins[ $folder ];
 			}
 		}
-		$dropin = file_exists( WP_CONTENT_DIR . '/advanced-cache.php' );
-		self::$data['page_cache'] = array( 'plugins' => $caching, 'advanced_cache' => $dropin, 'wp_cache' => defined( 'WP_CACHE' ) && WP_CACHE );
+		$dropin   = file_exists( WP_CONTENT_DIR . '/advanced-cache.php' );
+		$wp_cache = defined( 'WP_CACHE' ) && WP_CACHE;
+		// advanced-cache.php only runs when WP_CACHE is true in wp-config.php
+		self::$data['page_cache'] = array( 'plugins' => $caching, 'advanced_cache' => $dropin, 'wp_cache' => $wp_cache, 'active' => $caching || ( $dropin && $wp_cache ) );
+		if ( $dropin && ! $wp_cache ) {
+			self::add( 'caching', 'info', 'A leftover page-cache file does nothing',
+				'wp-content/advanced-cache.php exists, but WP_CACHE is off in wp-config.php, so it never runs. It was most likely left behind by a caching plugin that has been removed.',
+				'When you install a caching plugin it will replace this file. Until then it can be deleted (back up first).' );
+		}
 		if ( count( $caching ) > 1 ) {
 			self::add( 'caching', 'warning', count( $caching ) . ' caching plugins are active at once',
 				'Caching plugins fight each other: double processing, broken pages and caches that never clear properly.',
@@ -323,16 +412,49 @@ class JJSI_Checks {
 		if ( $counts['postmeta'] < 3000000 ) {
 			$counts['orphan_postmeta'] = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} pm LEFT JOIN {$wpdb->posts} p ON p.ID = pm.post_id WHERE p.ID IS NULL" );
 		}
+		$post_types = array();
+		if ( $counts['posts'] > 20000 ) {
+			foreach ( (array) $wpdb->get_results( "SELECT post_type, COUNT(*) AS n FROM {$wpdb->posts} GROUP BY post_type ORDER BY n DESC LIMIT 10", ARRAY_A ) as $row ) {
+				$post_types[ $row['post_type'] ] = (int) $row['n'];
+			}
+		}
+		$meta_keys = array();
+		if ( $counts['postmeta'] > 300000 && $counts['postmeta'] < 20000000 ) {
+			foreach ( (array) $wpdb->get_results( "SELECT meta_key, COUNT(*) AS n FROM {$wpdb->postmeta} GROUP BY meta_key ORDER BY n DESC LIMIT 12", ARRAY_A ) as $row ) {
+				$meta_keys[ (string) $row['meta_key'] ] = (int) $row['n'];
+			}
+		}
 		// phpcs:enable
-		self::$data['database'] = array( 'bytes' => $total, 'tables' => $rows, 'table_count' => count( (array) $tables ), 'myisam' => $myisam, 'counts' => $counts );
+		self::$data['database'] = array( 'bytes' => $total, 'tables' => $rows, 'table_count' => count( (array) $tables ), 'myisam' => $myisam, 'counts' => $counts, 'post_types' => $post_types, 'meta_keys' => $meta_keys );
+		foreach ( $post_types as $type => $n ) {
+			if ( $n < 10000 || in_array( $type, self::CORE_POST_TYPES, true ) ) {
+				continue;
+			}
+			$owner = isset( self::POST_TYPE_OWNERS[ $type ] ) ? self::POST_TYPE_OWNERS[ $type ] : self::owner_label( JJSI_Known::guess_owner( $type, $names ), $names );
+			self::add( 'database', $n > 50000 ? 'warning' : 'info',
+				sprintf( '%s stored "%s" items fill the posts table%s', number_format_i18n( $n ), $type, $owner ? ' (' . $owner . ')' : '' ),
+				sprintf( 'That\'s %d%% of everything in wp_posts, plus their rows in wp_postmeta. Old form entries and logs pile up for years and slow down queries and backups.', round( $n * 100 / max( 1, $counts['posts'] ) ) ),
+				'If these are old submissions or logs you don\'t need, export what you want to keep, then delete the old ones (or set the plugin to keep fewer). Back up first.',
+				(int) min( 200, $n / 1000 ) );
+		}
 
 		foreach ( $rows as $t ) {
+			if ( $t['owner'] && false !== strpos( $t['owner'], 'left over' ) && $t['size'] > 1048576 ) {
+				self::add( 'database', 'info', sprintf( 'Table %s is left over from a removed plugin (%s)', $t['name'], self::bytes( $t['size'] ) ),
+					'The plugin that created it is no longer installed, so the table is just taking up space and making backups bigger.',
+					'After a backup, delete the table (e.g. with phpMyAdmin or Advanced Database Cleaner).' );
+			}
 			if ( $t['size'] > 200 * 1048576 || ( $t['owner'] && $t['size'] > 50 * 1048576 ) ) {
+				$items = array();
+				$what  = $wpdb->postmeta === $t['name'] ? $meta_keys : ( $wpdb->posts === $t['name'] ? $post_types : array() );
+				foreach ( $what as $key => $n ) {
+					$items[] = sprintf( '%s: %s rows', '' === $key ? '(empty)' : $key, number_format_i18n( $n ) );
+				}
 				self::add( 'database', $t['size'] > 500 * 1048576 ? 'critical' : 'warning',
 					sprintf( 'Huge database table: %s (%s%s)', $t['name'], self::bytes( $t['size'] ), $t['owner'] ? ', from ' . $t['owner'] : '' ),
 					sprintf( 'This table has about %s rows. Huge tables slow down every query that uses them, and backups.', number_format_i18n( $t['rows'] ) ),
-					$t['owner'] ? 'Check ' . $t['owner'] . '\'s settings for log/history retention and clear old entries. If the plugin is no longer used, delete the plugin and its table.' : 'Find which plugin created this table and clean up its old data.',
-					(int) ( $t['size'] / 1048576 / 2 ) );
+					$t['owner'] ? 'Check ' . $t['owner'] . '\'s settings for log/history retention and clear old entries. If the plugin is no longer used, delete the plugin and its table.' : ( $items ? 'The details below show what fills it - the biggest entries usually point to the plugin responsible (e.g. saved form submissions or logs).' : 'Find which plugin created this table and clean up its old data.' ),
+					(int) ( $t['size'] / 1048576 / 2 ), $items );
 			}
 		}
 		if ( $myisam ) {
@@ -388,6 +510,7 @@ class JJSI_Checks {
 		$crons = function_exists( '_get_cron_array' ) ? _get_cron_array() : array();
 		$now   = time();
 		$names = self::plugin_names();
+		$active_folders = array_map( 'dirname', (array) get_option( 'active_plugins', array() ) );
 		$total = 0;
 		$overdue = array();
 		$frequent = array();
@@ -404,8 +527,13 @@ class JJSI_Checks {
 					if ( ! empty( $event['interval'] ) && $event['interval'] < 5 * MINUTE_IN_SECONDS ) {
 						$frequent[ $hook ] = $event['interval'];
 					}
-					if ( ! has_action( $hook ) ) {
-						$orphans[ $hook ] = true;
+					if ( ! has_action( $hook ) && ! in_array( $hook, self::CORE_CRON, true ) ) {
+						$owner = JJSI_Known::guess_owner( $hook, $names );
+						// Many plugins only attach their task code when cron itself runs, so only count tasks whose
+						// plugin isn't active.
+						if ( '' === $owner || ! in_array( $owner, $active_folders, true ) ) {
+							$orphans[ $hook ] = true;
+						}
 					}
 				}
 			}
@@ -441,8 +569,8 @@ class JJSI_Checks {
 		}
 		if ( count( $orphans ) > 3 ) {
 			$items = array_map( $label, array_slice( array_keys( $orphans ), 0, 15 ) );
-			self::add( 'cron', 'info', count( $orphans ) . ' scheduled tasks belong to nothing',
-				'No active plugin handles these tasks - they\'re usually left behind by plugins you\'ve deleted. They\'re harmless but clutter the schedule.',
+			self::add( 'cron', 'info', count( $orphans ) . ' scheduled tasks probably belong to removed plugins',
+				'No active plugin seems to handle these tasks - they\'re usually left behind by plugins you\'ve deleted. They\'re harmless but clutter the schedule.',
 				'Remove them with the free WP Crontrol plugin (Tools > Cron Events).', 0, $items );
 		}
 	}

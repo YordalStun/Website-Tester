@@ -107,9 +107,23 @@ class JJSI_Report {
 	 * @param array $checks JJSI_Checks::run() output.
 	 * @param array $notes  Things that went wrong while testing.
 	 */
-	public static function build( $runs, $visits, $checks, $notes = array() ) {
+	public static function build( $runs, $visits, $checks, $notes = array(), $baseline = array() ) {
 		$findings = isset( $checks['findings'] ) ? $checks['findings'] : array();
 		$pages    = array();
+		$cron_spawns  = array(); // WordPress calling its own wp-cron.php during a page load
+		$rewrite_runs = 0;
+		$run_count    = 0;
+		$home_host    = self::host( home_url() );
+		$is_cron_call = function ( $call ) use ( $home_host ) {
+			return false !== strpos( $call['url'], 'wp-cron.php' ) && self::host( $call['url'] ) === $home_host;
+		};
+		$external_ms = function ( $run ) use ( $is_cron_call ) {
+			$ms = 0;
+			foreach ( (array) $run['http'] as $call ) {
+				$ms += $is_cron_call( $call ) ? 0 : $call['ms'];
+			}
+			return $ms;
+		};
 		$owners   = array(); // owner => list of per-page medians
 		$q_owner  = array();
 		$all_queries = array();
@@ -125,6 +139,8 @@ class JJSI_Report {
 			$per_owner = array();
 			$per_owner_q = array();
 			foreach ( $list as $run ) {
+				$run_count++;
+				$rewrite_runs += empty( $run['rewrite_rebuilt'] ) ? 0 : 1;
 				$early = $early && ! empty( $run['early'] );
 				foreach ( (array) $run['owners'] as $owner => $info ) {
 					$per_owner[ $owner ][] = $info['load_ms'] + $info['hooks_ms'];
@@ -145,6 +161,10 @@ class JJSI_Report {
 					$per_owner_q[ $owner ][] = $c;
 				}
 				foreach ( (array) $run['http'] as $call ) {
+					if ( $is_cron_call( $call ) ) {
+						$cron_spawns[] = array( 'ms' => $call['ms'], 'page' => self::clean_url( $url ), 'total_ms' => $run['total_ms'] );
+						continue;
+					}
 					$key = $call['owner'] . ' ' . $call['method'] . ' ' . preg_replace( '/\?.*$/', '', $call['url'] );
 					if ( ! isset( $http[ $key ] ) ) {
 						$http[ $key ] = array( 'url' => $call['url'], 'method' => $call['method'], 'owner' => $call['owner'], 'times' => array(), 'status' => $call['status'], 'pages' => array() );
@@ -170,11 +190,12 @@ class JJSI_Report {
 				'url'         => self::clean_url( $url ),
 				'runs'        => count( $list ),
 				'total_ms'    => self::median( wp_list_pluck( $list, 'total_ms' ) ),
+				'max_ms'      => max( wp_list_pluck( $list, 'total_ms' ) ),
 				'startup_ms'  => self::median( wp_list_pluck( $list, 'startup_ms' ) ),
 				'template_ms' => self::median( wp_list_pluck( $list, 'template_ms' ) ),
 				'queries'     => self::median( wp_list_pluck( $list, 'query_count' ) ),
 				'query_ms'    => self::median( array_map( function ( $r ) { return array_sum( wp_list_pluck( (array) $r['queries'], 'ms' ) ); }, $list ) ),
-				'http_ms'     => self::median( array_map( function ( $r ) { return array_sum( wp_list_pluck( (array) $r['http'], 'ms' ) ); }, $list ) ),
+				'http_ms'     => self::median( array_map( $external_ms, $list ) ),
 				'memory_mb'   => max( wp_list_pluck( $list, 'memory_mb' ) ),
 				'status'      => $list[0]['status'],
 				'cached_ms'   => $visit_times ? self::median( $visit_times ) : null,
@@ -234,6 +255,24 @@ class JJSI_Report {
 		$template = $avg( 'template_ms' );
 		$cached   = array_filter( wp_list_pluck( $pages, 'cached_ms' ), 'is_numeric' );
 		$cached   = $cached ? array_sum( $cached ) / count( $cached ) : null;
+		// Normal visits are made from the server to itself, so they include the time it takes the server to reach
+		// its own website. Take that off (measured with a tiny static file) so slow self-connections aren't
+		// mistaken for slow pages.
+		$base_times = array();
+		foreach ( (array) $baseline as $b ) {
+			if ( empty( $b['error'] ) && isset( $b['ms'] ) ) {
+				$base_times[] = $b['ms'];
+			}
+		}
+		$base = array(
+			'median' => $base_times ? round( self::median( $base_times ) ) : null,
+			'max'    => $base_times ? round( max( $base_times ) ) : null,
+			'errors' => count( (array) $baseline ) - count( $base_times ),
+		);
+		$cached_raw = $cached;
+		if ( null !== $cached && null !== $base['median'] ) {
+			$cached = max( 0, $cached - $base['median'] );
+		}
 
 		// Where the time goes on an average page
 		$plugin_ms = 0;
@@ -254,7 +293,13 @@ class JJSI_Report {
 		);
 
 		$cdata = isset( $checks['data'] ) ? $checks['data'] : array();
-		$findings = array_merge( $findings, self::page_findings( $pages, $owner_rows, round( $total ), $cached, $cdata, $early, $all_queries, $http, $errors, $page_count ) );
+		$cron = array(
+			'count'  => count( $cron_spawns ),
+			'max_ms' => $cron_spawns ? round( max( wp_list_pluck( $cron_spawns, 'ms' ) ) ) : 0,
+			'visits' => $cron_spawns,
+		);
+		$ctx = array( 'baseline' => $base, 'cron' => $cron, 'rewrite_runs' => $rewrite_runs, 'run_count' => $run_count, 'cached_raw' => $cached_raw );
+		$findings = array_merge( $findings, self::page_findings( $pages, $owner_rows, round( $total ), $cached, $cdata, $early, $all_queries, $http, $errors, $page_count, $ctx ) );
 		if ( $notes ) {
 			$findings[] = self::finding( 'page', 'info', 'Some test visits didn\'t work', 'Results are based on the visits that did work.', '', 0, $notes );
 		}
@@ -287,6 +332,11 @@ class JJSI_Report {
 			'pages'      => array_values( $pages ),
 			'total_ms'   => round( $total ),
 			'cached_ms'  => null === $cached ? null : round( $cached ),
+			'cached_raw_ms' => null === $cached_raw ? null : round( $cached_raw ),
+			'baseline'   => $base,
+			'cron_spawns' => $cron,
+			'rewrite_runs' => $rewrite_runs,
+			'run_count'  => $run_count,
 			'breakdown'  => $breakdown,
 			'owners'     => array_values( $owner_rows ),
 			'queries'    => array_slice( array_values( array_map( function ( $q ) { $q['pages'] = count( $q['pages'] ); return $q; }, $all_queries ) ), 0, 40 ),
@@ -301,7 +351,7 @@ class JJSI_Report {
 		return $report;
 	}
 
-	private static function page_findings( $pages, $owner_rows, $total, $cached, $cdata, $early, $all_queries, $http, $errors, $page_count ) {
+	private static function page_findings( $pages, $owner_rows, $total, $cached, $cdata, $early, $all_queries, $http, $errors, $page_count, $ctx ) {
 		$out = array();
 		if ( ! $pages ) {
 			$out[] = self::finding( 'page', 'critical', 'No pages could be tested', 'Speed Inspector couldn\'t load any of the site\'s pages, so only the server and database checks below were run.', 'Check the site loads for logged-out visitors. If a security plugin or firewall blocks requests from the server to itself, allow them (WordPress\'s own Site Health "loopback" test needs this too).', 1000 );
@@ -317,20 +367,85 @@ class JJSI_Report {
 			$out[] = self::finding( 'page', 'good', 'Pages are built quickly (' . self::ms( $total ) . ')', $detail );
 		}
 
-		// Page cache: compare a normal visit with a profiled (uncached) one
-		$page_cache = ! empty( $cdata['page_cache']['plugins'] ) || ! empty( $cdata['page_cache']['advanced_cache'] );
-		if ( null !== $cached ) {
-			if ( $cached < 0.5 * $total && $cached < 400 ) {
-				$out[] = self::finding( 'caching', 'good', 'Page caching is working (' . self::ms( $cached ) . ' for a cached page)', sprintf( 'Normal visits are served in about %s instead of %s.', self::ms( $cached ), self::ms( $total ) ) );
-			} elseif ( $cached > 300 ) {
-				$out[] = self::finding(
-					'caching', $cached > 800 ? 'critical' : 'warning',
-					$page_cache ? 'The page cache isn\'t helping (pages still take ' . self::ms( $cached ) . ')' : 'No page caching (every visit takes ' . self::ms( $cached ) . ')',
-					$page_cache ? 'A caching plugin is active, but normal visits are still being built from scratch. The cache may be switched off, bypassed (e.g. by a cookie or a plugin), or cleared too often.' : 'Every visitor waits while WordPress builds the page from scratch. A page cache saves the finished page and serves it in a few milliseconds.',
-					$page_cache ? 'Open your caching plugin\'s settings and check page caching is enabled and that the home page isn\'t excluded. Clear the cache and run this test again.' : 'Install ONE caching plugin. LiteSpeed server: LiteSpeed Cache. SiteGround: Speed Optimizer. Otherwise: WP Super Cache (free), WP Fastest Cache (free) or WP Rocket (paid).',
-					(int) $cached
-				);
+		// Page cache: is one switched on, and do normal visits actually come back faster?
+		$pc         = isset( $cdata['page_cache'] ) ? $cdata['page_cache'] : array();
+		$page_cache = isset( $pc['active'] ) ? $pc['active'] : ( ! empty( $pc['plugins'] ) || ! empty( $pc['advanced_cache'] ) );
+		$base       = $ctx['baseline'];
+		$adjusted   = null !== $base['median'] && $base['median'] > 50
+			? sprintf( ' (%s measured, minus %s the server takes just to reach its own website)', self::ms( $ctx['cached_raw'] ), self::ms( $base['median'] ) )
+			: '';
+		$fast = null !== $cached && $cached < 0.5 * $total && $cached < 400;
+		if ( $fast ) {
+			$out[] = self::finding( 'caching', 'good', 'Normal visits come back fast (' . self::ms( $cached ) . ')' . ( $page_cache ? ' - page caching is working' : '' ), sprintf( 'Normal visits are served in about %s%s instead of the %s it takes to build a page.', self::ms( $cached ), $adjusted, self::ms( $total ) ) );
+		} elseif ( ! $page_cache ) {
+			$out[] = self::finding(
+				'caching', $total > 800 ? 'critical' : 'warning', 'No page caching - every visit builds the page from scratch',
+				sprintf( 'No page cache is switched on, so every visitor waits while WordPress builds the page (about %s here, more when the server is busy). A page cache saves the finished page and serves it in a few milliseconds.', self::ms( $total ) ),
+				'Install ONE caching plugin. On LiteSpeed servers: LiteSpeed Cache. SiteGround: Speed Optimizer. Otherwise: WP Super Cache (free), WP Fastest Cache (free) or WP Rocket (paid). Ask your host first - some include server caching.',
+				(int) $total
+			);
+		} elseif ( null !== $cached && $cached > 300 ) {
+			$out[] = self::finding(
+				'caching', $cached > 800 ? 'critical' : 'warning', 'The page cache isn\'t helping (normal visits take ' . self::ms( $cached ) . ')',
+				'Page caching is switched on, but normal visits are still slow' . $adjusted . '. The cache may be bypassed (by a cookie or a plugin), exclude these pages, or be cleared too often.',
+				'Open your caching plugin\'s settings, check page caching is enabled and these pages aren\'t excluded. Clear the cache and run this test again.',
+				(int) $cached
+			);
+		}
+
+		// The server reaching its own website (WP-Cron, Site Health and some plugins depend on this)
+		if ( null !== $base['median'] && ( $base['median'] > 300 || $base['max'] > 2000 ) ) {
+			$five = $base['max'] >= 4800 && $base['max'] <= 5600;
+			$out[] = self::finding(
+				'server', $base['max'] >= 2000 || $base['median'] > 1000 ? 'critical' : 'warning',
+				sprintf( 'The server is slow to reach its own website (%s on average, up to %s)', self::ms( $base['median'] ), self::ms( $base['max'] ) ),
+				'Fetching a tiny image from this site, from the server itself, should take a few milliseconds. WordPress does this kind of request during page loads to start its scheduled tasks (WP-Cron), and Site Health and some plugins do it too, so visitors end up waiting for it.'
+				. ( $five ? ' Delays of almost exactly 5 seconds are the classic sign of a slow or broken DNS server in the server\'s settings.' : '' ),
+				'Ask your host to check that the server can reach its own domain quickly: the server\'s DNS resolver settings (/etc/resolv.conf), IPv6, and the firewall. A common fix is adding the domain to the server\'s /etc/hosts. If the site is behind Cloudflare or another proxy, ask them to route requests to itself locally.',
+				(int) $base['max']
+			);
+		}
+
+		// WP-Cron started during a visit, making that visitor wait
+		$cron          = $ctx['cron'];
+		$cron_disabled = ! empty( $cdata['cron']['disabled'] );
+		if ( ! $cron['count'] && ! $cron_disabled && null !== $base['max'] && $base['max'] >= 500 ) {
+			// Not caught in the act during this test, but WP-Cron starts by calling the site itself, so whenever
+			// tasks are due the visitor waits about as long as that takes.
+			$out[] = self::finding(
+				'cron', $base['max'] >= 1000 ? 'critical' : 'warning',
+				sprintf( 'Scheduled tasks (WP-Cron) will make visitors wait up to about %s', self::ms( $base['max'] ) ),
+				'WordPress starts its scheduled tasks during a visitor\'s page load by calling wp-cron.php on this same site. This server takes up to ' . self::ms( $base['max'] ) . ' to reach its own website, so whenever tasks are due (at most once a minute) the visitor who happens to load a page waits about that long.'
+				. ( ! empty( $cdata['cron']['frequent'] ) ? ' Some tasks run every minute (' . implode( ', ', array_slice( array_keys( $cdata['cron']['frequent'] ), 0, 3 ) ) . '), so this happens to a visitor roughly every minute.' : '' ),
+				'Stop page visits from starting scheduled tasks: add define( \'DISABLE_WP_CRON\', true ); to wp-config.php, and create a real cron job in your hosting control panel that runs every 5 minutes: wget -q -O - ' . site_url( 'wp-cron.php?doing_wp_cron' ) . ' >/dev/null 2>&1. Also ask your host why the server is slow to reach its own website.',
+				(int) $base['max']
+			);
+		}
+		if ( $cron['count'] && $cron['max_ms'] >= 200 ) {
+			$frequent = ! empty( $cdata['cron']['frequent'] ) ? array_keys( $cdata['cron']['frequent'] ) : array();
+			$items    = array();
+			foreach ( $cron['visits'] as $v ) {
+				$items[] = sprintf( '%s - waited %s (whole page: %s)', $v['page'], self::ms( $v['ms'] ), self::ms( $v['total_ms'] ) );
 			}
+			$out[] = self::finding(
+				'cron', $cron['max_ms'] >= 1000 ? 'critical' : 'warning',
+				sprintf( 'Scheduled tasks (WP-Cron) make visitors wait up to %s', self::ms( $cron['max_ms'] ) ),
+				sprintf( 'In %d of %d test visits, WordPress started its scheduled tasks by calling wp-cron.php on this same site, and the visitor\'s page had to wait for that. It\'s meant to take a fraction of a second.', $cron['count'], $ctx['run_count'] )
+				. ( $frequent ? ' Some tasks run every minute (' . implode( ', ', array_slice( $frequent, 0, 3 ) ) . '), so this happens to a visitor roughly every minute.' : '' ),
+				'Stop page visits from starting scheduled tasks: add define( \'DISABLE_WP_CRON\', true ); to wp-config.php, and create a real cron job in your hosting control panel that runs every 5 minutes: wget -q -O - ' . site_url( 'wp-cron.php?doing_wp_cron' ) . ' >/dev/null 2>&1. Also see "slow to reach its own website" if that is reported.',
+				(int) $cron['max_ms'], $items
+			);
+		}
+
+		// Rewrite rules (permalinks) rebuilt on every page load - normally only when settings change
+		if ( $ctx['rewrite_runs'] >= 2 && $ctx['rewrite_runs'] * 2 >= $ctx['run_count'] ) {
+			$found = JJSI_Checks::find_code( 'flush_rewrite_rules' );
+			$out[] = self::finding(
+				'plugins', 'warning', 'Permalinks are rebuilt on every page load',
+				sprintf( 'In %d of %d test visits, WordPress rebuilt all its permalink rules from scratch (and older WordPress versions also save them to the database every time). That should only happen when permalink settings change. Something is calling flush_rewrite_rules() on every page load, which wastes time on every visit.', $ctx['rewrite_runs'], $ctx['run_count'] ),
+				'Look at the plugins/theme listed below: one of them calls flush_rewrite_rules() on every page load instead of only when it\'s activated. Update it, or ask its author to fix it. (Calls inside activation code are normal.)',
+				60, $found
+			);
 		}
 
 		// Plugins
@@ -456,8 +571,22 @@ class JJSI_Report {
 			$queries = $r['pages'] ? array_sum( wp_list_pluck( $r['pages'], 'queries' ) ) / count( $r['pages'] ) : 0;
 			$causes[] = array( 'Slow database server', $checks['db_query_ms'] * $queries, sprintf( 'Every database query takes about %.1f ms even when it\'s trivial, and pages run about %d of them.', $checks['db_query_ms'], $queries ) );
 		}
-		if ( null !== $r['cached_ms'] && $r['cached_ms'] > 300 && $r['cached_ms'] > 0.5 * $total ) {
-			$causes[] = array( 'No working page cache', $r['cached_ms'] * 0.8, sprintf( 'Normal visits take %s because pages aren\'t being served from a cache. A working page cache would serve them in a few milliseconds.', self::ms( $r['cached_ms'] ) ) );
+		$page_cache = ! empty( $checks['page_cache']['active'] );
+		$cached     = $r['cached_ms'];
+		if ( ! $page_cache && ( null === $cached || $cached > 0.5 * $total ) && $total > 150 ) {
+			$causes[] = array( 'No page caching', $total * 0.6, sprintf( 'No page cache is switched on, so every visitor waits about %s while WordPress builds the page from scratch. A page cache would serve most visits in a few milliseconds.', self::ms( $total ) ) );
+		} elseif ( $page_cache && null !== $cached && $cached > 300 && $cached > 0.5 * $total ) {
+			$causes[] = array( 'The page cache isn\'t working', $cached * 0.8, sprintf( 'Page caching is switched on, but normal visits still take about %s - pages aren\'t being served from the cache.', self::ms( $cached ) ) );
+		}
+		$cron = isset( $r['cron_spawns'] ) ? $r['cron_spawns'] : array( 'count' => 0, 'max_ms' => 0 );
+		$base = isset( $r['baseline'] ) ? $r['baseline'] : array( 'median' => null, 'max' => null );
+		$slow_self = null !== $base['max'] && ( $base['max'] > 2000 || $base['median'] > 300 );
+		$cron_disabled = ! empty( $checks['cron']['disabled'] );
+		$cron_wait     = $cron['max_ms'] >= 500 ? $cron['max_ms'] : ( ! $cron_disabled && $slow_self ? $base['max'] : 0 );
+		if ( $cron_wait >= 500 ) {
+			$causes[] = array( 'Scheduled tasks (WP-Cron) making visitors wait', $cron_wait * 0.8, sprintf( 'Whenever scheduled tasks are due, the visitor who happens to load a page waits while WordPress starts them - up to %s %s, when it should take a fraction of a second.%s Fix: switch WP-Cron off for page visits and run it from a real cron job instead (see Scheduled tasks below).', self::ms( $cron_wait ), $cron['max_ms'] >= 500 ? 'in this test' : 'on this server', $slow_self ? ' The underlying problem is that the server is slow to reach its own website (see Server).' : '' ) );
+		} elseif ( $slow_self ) {
+			$causes[] = array( 'The server is slow to reach its own website', $base['max'] * 0.3, sprintf( 'Requests from the server to its own website take up to %s. WordPress makes these to start scheduled tasks, so some visitors end up waiting for them. Ask your host to check the server\'s DNS settings.', self::ms( $base['max'] ) ) );
 		}
 		if ( ! empty( $checks['autoload']['bytes'] ) && $checks['autoload']['bytes'] > 800 * 1024 ) {
 			$causes[] = array( 'Too much autoloaded data', $checks['autoload']['bytes'] / 1048576 * 60, sprintf( '%s of settings are loaded from the database on every page. The biggest are listed in the Database section.', JJSI_Checks::bytes( $checks['autoload']['bytes'] ) ) );
@@ -470,7 +599,13 @@ class JJSI_Report {
 		usort( $causes, function ( $a, $b ) { return $b[1] <=> $a[1]; } );
 		$paragraphs = array();
 		if ( $r['pages'] ) {
-			$paragraphs[] = sprintf( 'Building a page from scratch takes about %s%s.', self::ms( $total ), null !== $r['cached_ms'] ? sprintf( '; a normal visit took %s', self::ms( $r['cached_ms'] ) ) : '' );
+			$slowest = max( wp_list_pluck( $r['pages'], 'max_ms' ) );
+			$paragraphs[] = sprintf(
+				'Building a page from scratch takes about %s%s%s.',
+				self::ms( $total ),
+				null !== $cached ? sprintf( '; a normal visit took %s', self::ms( $cached ) ) : '',
+				$slowest > 2 * $total && $slowest > 1500 ? sprintf( ' - but the slowest test visit took %s', self::ms( $slowest ) ) : ''
+			);
 		}
 		if ( ! $causes ) {
 			return array( 'headline' => $r['pages'] ? 'No major speed problems found inside WordPress' : 'Pages couldn\'t be tested', 'paragraphs' => $paragraphs, 'causes' => array() );
@@ -638,11 +773,11 @@ class JJSI_Report {
 	private static function render_details( $key, $r ) {
 		$c = $r['checks'];
 		if ( 'page' === $key && $r['pages'] ) {
-			echo '<h3>Pages tested</h3><div class="jjsi-scroll"><table class="jjsi-table"><thead><tr><th>Page</th><th class="num">Built from scratch</th><th class="num">Normal visit</th><th class="num">Queries</th><th class="num">Memory</th></tr></thead>';
+			echo '<h3>Pages tested</h3><div class="jjsi-scroll"><table class="jjsi-table"><thead><tr><th>Page</th><th class="num">Built from scratch</th><th class="num">Slowest visit</th><th class="num">Normal visit</th><th class="num">Queries</th><th class="num">Memory</th></tr></thead>';
 			foreach ( $r['pages'] as $p ) {
 				printf(
-					'<tr><td>%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%d</td><td class="num">%s MB</td></tr>',
-					esc_html( $p['url'] ), esc_html( self::ms( $p['total_ms'] ) ), esc_html( null === $p['cached_ms'] ? '-' : self::ms( $p['cached_ms'] ) ), (int) $p['queries'], esc_html( $p['memory_mb'] )
+					'<tr><td>%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%s</td><td class="num">%d</td><td class="num">%s MB</td></tr>',
+					esc_html( $p['url'] ), esc_html( self::ms( $p['total_ms'] ) ), esc_html( self::ms( isset( $p['max_ms'] ) ? $p['max_ms'] : $p['total_ms'] ) ), esc_html( null === $p['cached_ms'] ? '-' : self::ms( $p['cached_ms'] ) ), (int) $p['queries'], esc_html( $p['memory_mb'] )
 				);
 			}
 			echo '</table></div>';
@@ -762,10 +897,21 @@ class JJSI_Report {
 		$lines[] = '';
 		$lines[] = '## Pages tested';
 		$lines[] = '';
-		$lines[] = '| Page | Built from scratch (ms) | Normal visit (ms) | Start-up (ms) | Template (ms) | Queries | Query time (ms) | Waiting for other sites (ms) | Peak memory (MB) | HTTP status |';
-		$lines[] = '|---|---|---|---|---|---|---|---|---|---|';
+		$base = isset( $r['baseline'] ) ? $r['baseline'] : array( 'median' => null, 'max' => null, 'errors' => 0 );
+		if ( null !== $base['median'] ) {
+			$lines[] = sprintf( 'Server reaching its own website (tiny static file, from the server): median %d ms, max %d ms. "Normal visit" times below include this; the cache verdict subtracts the median.', $base['median'], $base['max'] );
+		}
+		if ( ! empty( $r['cron_spawns']['count'] ) ) {
+			$lines[] = sprintf( 'WP-Cron was started during %d of %d test visits (wp-cron.php called on this site), the longest wait was %d ms.', $r['cron_spawns']['count'], $r['run_count'], $r['cron_spawns']['max_ms'] );
+		}
+		if ( ! empty( $r['rewrite_runs'] ) ) {
+			$lines[] = sprintf( 'Rewrite rules were rebuilt during %d of %d test visits.', $r['rewrite_runs'], $r['run_count'] );
+		}
+		$lines[] = '';
+		$lines[] = '| Page | Built from scratch, median (ms) | Slowest visit (ms) | Normal visit (ms) | Start-up (ms) | Template (ms) | Queries | Query time (ms) | Waiting for other sites (ms) | Peak memory (MB) | HTTP status |';
+		$lines[] = '|---|---|---|---|---|---|---|---|---|---|---|';
 		foreach ( $r['pages'] as $p ) {
-			$lines[] = sprintf( '| %s | %d | %s | %d | %d | %d | %d | %d | %s | %d |', $p['url'], $p['total_ms'], null === $p['cached_ms'] ? '-' : (int) $p['cached_ms'], $p['startup_ms'], $p['template_ms'], $p['queries'], $p['query_ms'], $p['http_ms'], $p['memory_mb'], $p['status'] );
+			$lines[] = sprintf( '| %s | %d | %d | %s | %d | %d | %d | %d | %d | %s | %d |', $p['url'], $p['total_ms'], isset( $p['max_ms'] ) ? $p['max_ms'] : $p['total_ms'], null === $p['cached_ms'] ? '-' : (int) $p['cached_ms'], $p['startup_ms'], $p['template_ms'], $p['queries'], $p['query_ms'], $p['http_ms'], $p['memory_mb'], $p['status'] );
 		}
 		$lines[] = '';
 		$lines[] = '## Time per plugin / theme (average per page)';
@@ -873,6 +1019,7 @@ class JJSI_Report {
 		}
 		$lines[] = '';
 		$lines[] = '(Database passwords, keys and user data are not included. Query text is included and could contain content from your site.)';
-		return implode( "\n", $lines ) . "\n";
+		// Other plugins sometimes log the test addresses - never let the one-time key end up in the file
+		return preg_replace( '/(jjsi_profile=)[A-Za-z0-9%]+/', '$1[removed]', implode( "\n", $lines ) ) . "\n";
 	}
 }

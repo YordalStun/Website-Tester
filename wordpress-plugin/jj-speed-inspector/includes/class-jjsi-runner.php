@@ -13,6 +13,7 @@ defined( 'ABSPATH' ) || exit;
 class JJSI_Runner {
 	const RUNS_PER_PAGE   = 3;
 	const VISITS_PER_PAGE = 2;
+	const BASELINE_VISITS = 3;
 	const MAX_PAGES       = 4;
 	const STATE           = 'jjsi_state';
 	const REPORT          = 'jjsi_last_report';
@@ -63,6 +64,9 @@ class JJSI_Runner {
 		set_transient( 'jjsi_token', $token, HOUR_IN_SECONDS );
 		$urls  = self::pages( $extra );
 		$steps = array();
+		for ( $i = 0; $i < self::BASELINE_VISITS; $i++ ) {
+			$steps[] = array( 'do' => 'baseline' );
+		}
 		foreach ( $urls as $url ) {
 			for ( $i = 0; $i < self::VISITS_PER_PAGE; $i++ ) {
 				$steps[] = array( 'do' => 'visit', 'url' => $url );
@@ -73,7 +77,7 @@ class JJSI_Runner {
 		}
 		$steps[] = array( 'do' => 'checks' );
 		$steps[] = array( 'do' => 'finish' );
-		$state = array( 'token' => $token, 'urls' => $urls, 'runs' => array(), 'visits' => array(), 'notes' => array(), 'checks' => null, 'started' => time() );
+		$state = array( 'token' => $token, 'urls' => $urls, 'runs' => array(), 'visits' => array(), 'baseline' => array(), 'notes' => array(), 'checks' => null, 'started' => time() );
 		update_option( self::STATE, $state, false );
 		return array( 'steps' => $steps, 'urls' => $urls );
 	}
@@ -96,6 +100,24 @@ class JJSI_Runner {
 			'headers'     => array( 'Accept' => 'text/html', 'Cache-Control' => 'no-cache' ),
 			'cookies'     => array(),
 		);
+	}
+
+	/**
+	 * How long the server takes just to fetch a tiny static file from itself (no PHP involved). This is the cost of
+	 * the server connecting to its own website - it's included in every "normal visit" timing, and it's what
+	 * WP-Cron and WordPress's other self-requests pay.
+	 */
+	public static function baseline() {
+		$state = self::state();
+		$start = microtime( true );
+		$resp  = wp_remote_get( add_query_arg( 'jjsi', wp_rand(), includes_url( 'images/blank.gif' ) ), self::request_args() );
+		$ms    = ( microtime( true ) - $start ) * 1000;
+		$entry = is_wp_error( $resp ) ? array( 'error' => $resp->get_error_message(), 'ms' => round( $ms, 1 ) ) : array( 'ms' => round( $ms, 1 ), 'status' => wp_remote_retrieve_response_code( $resp ) );
+		if ( $state ) {
+			$state['baseline'][] = $entry;
+			self::save_state( $state );
+		}
+		return array( 'ok' => ! is_wp_error( $resp ) ) + $entry;
 	}
 
 	/** A normal visit, as a page cache would see it. */
@@ -199,7 +221,7 @@ class JJSI_Runner {
 		if ( null === $state['checks'] ) {
 			$state['checks'] = JJSI_Checks::run();
 		}
-		$report = JJSI_Report::build( $state['runs'], $state['visits'], $state['checks'], array_unique( $state['notes'] ) );
+		$report = JJSI_Report::build( $state['runs'], $state['visits'], $state['checks'], array_unique( $state['notes'] ), isset( $state['baseline'] ) ? $state['baseline'] : array() );
 		update_option( self::REPORT, $report, false );
 		update_option( self::RAW, $state['runs'], false );
 		delete_option( self::STATE );
@@ -214,7 +236,9 @@ class JJSI_Runner {
 			if ( $progress ) {
 				call_user_func( $progress, $i + 1, count( $plan['steps'] ), $step );
 			}
-			if ( 'visit' === $step['do'] ) {
+			if ( 'baseline' === $step['do'] ) {
+				self::baseline();
+			} elseif ( 'visit' === $step['do'] ) {
 				$r = self::visit( $step['url'] );
 				if ( empty( $r['ok'] ) ) {
 					self::note( 'Normal visit to ' . $step['url'] . ' failed: ' . $r['error'] );
@@ -249,6 +273,9 @@ class JJSI_Runner {
 				case 'begin':
 					$extra = isset( $_POST['extra'] ) ? esc_url_raw( wp_unslash( $_POST['extra'] ) ) : '';
 					wp_send_json_success( self::begin( $extra ) );
+					break;
+				case 'baseline':
+					wp_send_json_success( self::baseline() );
 					break;
 				case 'visit':
 					wp_send_json_success( self::visit( $url ) );

@@ -3,7 +3,7 @@
  * Plugin Name:       Speed Inspector
  * Plugin URI:        https://github.com/YordalStun/Website-Tester
  * Description:       Finds out exactly what is slowing your site down - which plugins, database queries, calls to other websites, the server or settings - and tells you how to fix it. Go to Tools &gt; Speed Inspector.
- * Version:           1.0.0
+ * Version:           1.1.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            JJ Hosting
@@ -16,7 +16,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'JJSI_VERSION', '1.0.0' );
+define( 'JJSI_VERSION', '1.1.0' );
 define( 'JJSI_FILE', __FILE__ );
 define( 'JJSI_DIR', __DIR__ );
 
